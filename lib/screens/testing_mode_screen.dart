@@ -276,13 +276,10 @@ class _TestingModeScreenState extends State<TestingModeScreen> {
   Future<void> _handleUploadVideo() async {
     if (_isAnalyzingVideo || _isCapturing) return;
 
-    final picked = await FilePicker.platform.pickFiles(
+    final file = await FilePicker.pickFile(
       type: FileType.video,
-      allowMultiple: false,
     );
-    if (picked == null || picked.files.isEmpty) return;
-
-    final file = picked.files.single;
+    if (file == null) return;
     final path = file.path;
     if (path == null || path.isEmpty) {
       setState(() {
