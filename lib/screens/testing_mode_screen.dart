@@ -1078,7 +1078,13 @@ class _TestingModeScreenState extends State<TestingModeScreen> {
                   child: SizedBox(
                     width: previewSize.height,
                     height: previewSize.width,
-                    child: CameraPreview(_cameraController!),
+                    child: _activeLensDirection == CameraLensDirection.front
+                        ? Transform(
+                            alignment: Alignment.center,
+                            transform: Matrix4.diagonal3Values(-1, 1, 1),
+                            child: CameraPreview(_cameraController!),
+                          )
+                        : CameraPreview(_cameraController!),
                   ),
                 ),
               ),
@@ -1088,13 +1094,20 @@ class _TestingModeScreenState extends State<TestingModeScreen> {
             child: ValueListenableBuilder<List<Hand>>(
               valueListenable: _latestHands,
               builder: (context, hands, _) {
-                return HandLandmarkOverlay(
+                final overlay = HandLandmarkOverlay(
                   hands: hands,
                   previewSize: previewSize,
                   lensDirection:
                       _activeLensDirection ?? CameraLensDirection.front,
                   sensorOrientation: _sensorOrientation,
                 );
+                return _activeLensDirection == CameraLensDirection.front
+                    ? Transform(
+                        alignment: Alignment.center,
+                        transform: Matrix4.diagonal3Values(-1, 1, 1),
+                        child: overlay,
+                      )
+                    : overlay;
               },
             ),
           ),
