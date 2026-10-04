@@ -11,6 +11,7 @@ import '../models/frame_landmarks.dart';
 import '../services/tflite_ai_service.dart';
 import '../services/video_landmark_service.dart';
 import '../utils/constants.dart';
+import '../utils/live_landmark_transform.dart';
 import '../widgets/bottom_nav_bar.dart';
 import '../widgets/esenyas_app_bar.dart';
 import '../widgets/hand_landmark_overlay.dart';
@@ -195,14 +196,13 @@ class _TestingModeScreenState extends State<TestingModeScreen> {
     if (hands.isEmpty) {
       _frameBuffer.add(const FrameLandmarks.noHand());
     } else {
-      // Match Colab: model input stays in raw MediaPipe camera/sensor space.
-      // The skeleton overlay handles portrait rotation separately.
-      final rawHands = hands.map((hand) {
-        return hand.landmarks
-            .map((lm) => <double>[lm.x, lm.y, lm.z])
-            .toList();
-      }).toList();
-      _frameBuffer.add(FrameLandmarks(handDetected: true, hands: rawHands));
+      // Keep the screen portrait while giving the model the same coordinates
+      // as the successful physical landscape-left device orientation.
+      final modelHands =
+          LiveLandmarkTransform.toTrainingLandscapeRawHands(hands);
+      _frameBuffer.add(
+        FrameLandmarks(handDetected: true, hands: modelHands),
+      );
     }
   }
 
@@ -986,6 +986,7 @@ class _TestingModeScreenState extends State<TestingModeScreen> {
                                       'lastActiveFrames: ${_aiService.lastActiveFrames}\n'
                                       'activeRange: $_lastActiveRange\n'
                                       'mirrorInputX (model): ${TFLiteAIService.mirrorInputX}\n'
+                                      'live model rotation: CW 90° (landscape-left equivalent)\n'
                                       'lastTop3:',
                                       style: const TextStyle(
                                         color: Color(0xFFE2E8F0),
