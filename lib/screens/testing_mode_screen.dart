@@ -10,11 +10,12 @@ import '../services/tflite_ai_service.dart';
 import '../utils/constants.dart';
 import '../widgets/bottom_nav_bar.dart';
 import '../widgets/esenyas_app_bar.dart';
+import '../widgets/hand_landmark_overlay.dart';
 
 /// Testing Mode screen for evaluating gesture recognition accuracy.
 ///
 /// Each "Next" cycle:
-///   1. Picks a random expected gesture from [kTestGestures].
+///   1. Picks a random expected gesture directly from the loaded model labels.
 ///   2. Runs a 4-second camera capture (same bounded-capture loop as the
 ///      main translation screen).
 ///   3. Runs TFLite inference on the captured buffer, measuring only the
@@ -47,7 +48,7 @@ class _TestingModeScreenState extends State<TestingModeScreen> {
   Timer? _captureTimer;
 
   // ── Test display state ──
-  String _expectedGesture = kTestGestures[0];
+  String _expectedGesture = '—';
   String _detectedGesture = '—';
   bool _isCorrect = false;
   String _inferenceTime = '0.00';
@@ -60,6 +61,16 @@ class _TestingModeScreenState extends State<TestingModeScreen> {
   bool _isRunningGoldenTest = false;
   GoldenResult? _goldenResult;
   int _latestHandCount = 0;
+  final ValueNotifier<List<Hand>> _latestHands =
+      ValueNotifier<List<Hand>>(const []);
+  DateTime? _landmarkFpsWindowStart;
+  int _landmarkFpsWindowCallbacks = 0;
+  double _landmarkFps = 0;
+  int _captureLandmarkCallbacks = 0;
+  double _lastCaptureLandmarkFps = 0;
+  Stopwatch? _captureStopwatch;
+  int _sensorOrientation = 0;
+  CameraLensDirection? _activeLensDirection;
   Timer? _debugTimer;
 
   // ──────────────────────────────────────────────────────────
@@ -81,6 +92,8 @@ class _TestingModeScreenState extends State<TestingModeScreen> {
   void dispose() {
     _debugTimer?.cancel();
     _captureTimer?.cancel();
+    _captureStopwatch?.stop();
+    _latestHands.dispose();
     _landmarkSub?.cancel();
     _cameraController?.stopImageStream();
     _cameraController?.dispose();
@@ -100,6 +113,9 @@ class _TestingModeScreenState extends State<TestingModeScreen> {
     }
 
     await _aiService.initialize();
+    if (mounted && _aiService.labels.isNotEmpty) {
+      setState(() => _expectedGesture = _aiService.labels.first);
+    }
     _landmarkSub = _aiService.handPlugin.landmarkStream.listen(_onLandmarks);
     await _openCamera();
   }
@@ -129,6 +145,8 @@ class _TestingModeScreenState extends State<TestingModeScreen> {
       setState(() {
         _cameraController = controller;
         _cameraReady = true;
+        _sensorOrientation = controller.description.sensorOrientation;
+        _activeLensDirection = controller.description.lensDirection;
       });
     }
   }
@@ -139,7 +157,23 @@ class _TestingModeScreenState extends State<TestingModeScreen> {
 
   void _onLandmarks(List<Hand> hands) {
     _latestHandCount = hands.length;
+    _latestHands.value = List<Hand>.unmodifiable(hands);
+
+    final now = DateTime.now();
+    _landmarkFpsWindowStart ??= now;
+    _landmarkFpsWindowCallbacks++;
+    final fpsElapsedMs =
+        now.difference(_landmarkFpsWindowStart!).inMilliseconds;
+    if (fpsElapsedMs >= 1000) {
+      _landmarkFps =
+          _landmarkFpsWindowCallbacks * 1000.0 / fpsElapsedMs;
+      _landmarkFpsWindowStart = now;
+      _landmarkFpsWindowCallbacks = 0;
+    }
+
     if (!_isCapturing) return;
+    _captureLandmarkCallbacks++;
+
     if (hands.isEmpty) {
       _frameBuffer.add(const FrameLandmarks.noHand());
     } else {
@@ -157,9 +191,12 @@ class _TestingModeScreenState extends State<TestingModeScreen> {
   void _handleNextGesture() {
     if (_isCapturing || !_cameraReady) return;
 
-    final idx = _random.nextInt(kTestGestures.length);
+    final modelLabels = _aiService.labels;
+    if (modelLabels.isEmpty) return;
+    final idx = _random.nextInt(modelLabels.length);
+
     setState(() {
-      _expectedGesture = kTestGestures[idx];
+      _expectedGesture = modelLabels[idx];
       _detectedGesture = '—';
       _isCorrect = false;
       _inferenceTime = '0.00';
@@ -170,11 +207,24 @@ class _TestingModeScreenState extends State<TestingModeScreen> {
     });
 
     _frameBuffer.clear();
+    _captureLandmarkCallbacks = 0;
+    _lastCaptureLandmarkFps = 0;
+    _captureStopwatch?.stop();
+    _captureStopwatch = Stopwatch()..start();
     _captureTimer = Timer(const Duration(seconds: 4), _onCaptureComplete);
   }
 
   Future<void> _onCaptureComplete() async {
     if (!mounted) return;
+
+    // Freeze the bounded capture before inference so late landmark callbacks
+    // cannot change the debug metrics or buffer for this test cycle.
+    _isCapturing = false;
+    _captureStopwatch?.stop();
+    final captureElapsedMs = _captureStopwatch?.elapsedMilliseconds ?? 0;
+    _lastCaptureLandmarkFps = captureElapsedMs > 0
+        ? _captureLandmarkCallbacks * 1000.0 / captureElapsedMs
+        : 0;
     final buffer = List<FrameLandmarks>.from(_frameBuffer);
 
     // Measure only preprocessing + inference, not the 4-second capture.
@@ -236,6 +286,12 @@ class _TestingModeScreenState extends State<TestingModeScreen> {
 
   int get _accuracy =>
       _testCount > 0 ? (_correctCount / _testCount * 100).round() : 0;
+
+  String get _lastActiveRange {
+    final first = _aiService.lastFirstActive;
+    final last = _aiService.lastLastActive;
+    return first >= 0 && last >= 0 ? '$first..$last' : 'none';
+  }
 
   // ──────────────────────────────────────────────────────────
   // Build
@@ -706,9 +762,16 @@ class _TestingModeScreenState extends State<TestingModeScreen> {
                                     const SizedBox(height: 8),
                                     Text(
                                       'Hands in latest frame: $_latestHandCount\n'
+                                      'Live landmark FPS: ${_landmarkFps.toStringAsFixed(1)}\n'
                                       'Frames buffered: ${_frameBuffer.length}\n'
+                                      'Capture callbacks: $_captureLandmarkCallbacks\n'
+                                      'Last capture FPS: ${_lastCaptureLandmarkFps.toStringAsFixed(1)}\n'
+                                      'Sensor orientation: $_sensorOrientation°\n'
+                                      'Lens: ${_activeLensDirection?.name ?? "unknown"}\n'
+                                      'lastBufferFrames: ${_aiService.lastBufferFrames}\n'
                                       'lastActiveFrames: ${_aiService.lastActiveFrames}\n'
-                                      'mirrorInputX: ${TFLiteAIService.mirrorInputX}\n'
+                                      'activeRange: $_lastActiveRange\n'
+                                      'mirrorInputX (model): ${TFLiteAIService.mirrorInputX}\n'
                                       'lastTop3:',
                                       style: const TextStyle(
                                         color: Color(0xFFE2E8F0),
@@ -784,6 +847,8 @@ class _TestingModeScreenState extends State<TestingModeScreen> {
       );
     }
 
+    final previewSize = _cameraController!.value.previewSize!;
+
     return ClipRRect(
       borderRadius: BorderRadius.circular(ESenyasDimens.borderRadiusMd),
       child: Stack(
@@ -797,12 +862,24 @@ class _TestingModeScreenState extends State<TestingModeScreen> {
                 child: FittedBox(
                   fit: BoxFit.cover,
                   child: SizedBox(
-                    width: _cameraController!.value.previewSize!.height,
-                    height: _cameraController!.value.previewSize!.width,
+                    width: previewSize.height,
+                    height: previewSize.width,
                     child: CameraPreview(_cameraController!),
                   ),
                 ),
               ),
+            ),
+          ),
+          Positioned.fill(
+            child: ValueListenableBuilder<List<Hand>>(
+              valueListenable: _latestHands,
+              builder: (context, hands, _) {
+                return HandLandmarkOverlay(
+                  hands: hands,
+                  sourceSize: Size(previewSize.height, previewSize.width),
+                  mirrorX: _activeLensDirection == CameraLensDirection.front,
+                );
+              },
             ),
           ),
           if (_isCapturing)

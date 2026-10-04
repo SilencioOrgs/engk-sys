@@ -52,9 +52,15 @@ class TFLiteAIService implements AIService {
   // ── Debug metrics ──
   List<MapEntry<String, double>> _lastTop3 = const [];
   int _lastActiveFrames = 0;
+  int _lastBufferFrames = 0;
+  int _lastFirstActive = -1;
+  int _lastLastActive = -1;
 
   List<MapEntry<String, double>> get lastTop3 => _lastTop3;
   int get lastActiveFrames => _lastActiveFrames;
+  int get lastBufferFrames => _lastBufferFrames;
+  int get lastFirstActive => _lastFirstActive;
+  int get lastLastActive => _lastLastActive;
   List<String> get labels => _labels;
 
   /// Provides access to the MediaPipe hand landmark stream.
@@ -167,12 +173,21 @@ class TFLiteAIService implements AIService {
   ///   - Buffer has fewer than [minActiveFrames] active frames, or
   ///   - Top softmax probability < [confidenceThreshold] (60%).
   Future<DetectedSign?> recognizeFromBuffer(List<FrameLandmarks> buffer) async {
-    if (_interpreter == null || buffer.isEmpty) return null;
+    if (_interpreter == null) return null;
 
-    final activeCount = buffer
-        .where((f) => f.handDetected && f.hands.isNotEmpty)
-        .length;
-    _lastActiveFrames = activeCount;
+    _lastBufferFrames = buffer.length;
+    final activeIndices = [
+      for (var i = 0; i < buffer.length; i++)
+        if (buffer[i].handDetected && buffer[i].hands.isNotEmpty) i,
+    ];
+    _lastActiveFrames = activeIndices.length;
+    _lastFirstActive = activeIndices.isEmpty ? -1 : activeIndices.first;
+    _lastLastActive = activeIndices.isEmpty ? -1 : activeIndices.last;
+
+    if (buffer.isEmpty) {
+      _lastTop3 = const [];
+      return null;
+    }
 
     final seq = buildSequence(buffer, mirrorX: mirrorInputX);
     if (seq == null) {

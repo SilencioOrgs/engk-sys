@@ -354,7 +354,7 @@ class _GestureTranslationScreenState
                                   confidence: _currentConfidence,
                                   darkMode: darkMode,
                                   statusText: _isCountingDown
-                                      ? 'Maghanda... $_countdown'
+                                      ? 'Maghanda... $_countdown · kamay muna sa labas ng frame'
                                       : null,
                                 ),
                                 const SizedBox(height: 8),
@@ -875,7 +875,7 @@ class _DetectionStatusPill extends StatelessWidget {
           break;
         case 'scanning':
           dotColor = const Color(0xFFFACC15); // yellow-400
-          text = 'Naghahanap ng Kamay...';
+          text = 'Gawin ang senyas ngayon...';
           break;
         default:
           dotColor = ESenyasColors.gray300;
