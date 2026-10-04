@@ -12,6 +12,7 @@ import '../providers/app_provider.dart';
 import '../services/tflite_ai_service.dart';
 import '../services/video_landmark_service.dart';
 import '../utils/constants.dart';
+import '../utils/live_landmark_transform.dart';
 import '../widgets/bottom_nav_bar.dart';
 import '../widgets/esenyas_app_bar.dart';
 import '../widgets/hand_landmark_overlay.dart';
@@ -44,6 +45,7 @@ class _GestureTranslationScreenState
   bool _cameraReady = false;
   bool _permissionGranted = true; // optimistic until runtime check
   CameraLensDirection _lensDirection = CameraLensDirection.front;
+  int _sensorOrientation = 0;
 
   // ── Dynamic camera frame height ──
   static const double _cameraHeightMin = 140.0;
@@ -156,6 +158,7 @@ class _GestureTranslationScreenState
         _cameraController = controller;
         _cameraReady = true;
         _lensDirection = direction;
+        _sensorOrientation = controller.description.sensorOrientation;
       });
     }
   }
@@ -184,11 +187,10 @@ class _GestureTranslationScreenState
     } else {
       // Convert hand_landmarker Hand/Landmark objects to raw doubles so
       // TFLiteAIService has no dependency on the plugin package.
-      final rawHands = hands.map((hand) {
-        return hand.landmarks
-            .map((lm) => [lm.x, lm.y, lm.z])
-            .toList();
-      }).toList();
+      final rawHands = LiveLandmarkTransform.toUprightRawHands(
+        hands,
+        _sensorOrientation,
+      );
 
       _frameBuffer.add(FrameLandmarks(handDetected: true, hands: rawHands));
     }
@@ -778,6 +780,7 @@ class _GestureTranslationScreenState
                   return HandLandmarkOverlay(
                     hands: hands,
                     mirrorX: _lensDirection == CameraLensDirection.front,
+                    rotationDegrees: _sensorOrientation,
                   );
                 },
               ),
