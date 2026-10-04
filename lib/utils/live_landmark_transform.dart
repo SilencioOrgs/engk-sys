@@ -1,11 +1,14 @@
 import 'package:hand_landmarker/hand_landmarker.dart';
 
-/// Converts live camera landmarks from the raw camera sensor coordinate space
-/// into the same upright portrait coordinate space used by the preview and by
-/// the Colab video pipeline.
+/// Coordinate transforms for live-camera MediaPipe landmarks.
 ///
-/// Uploaded videos must NOT use this transform because they are already decoded
-/// upright before MediaPipe VIDEO-mode inference.
+/// The app UI stays portrait, but the trained model was validated with
+/// landscape 16:9 video. On the test phone, recognition works when the device
+/// is physically rotated landscape-left (top edge toward the user's left).
+/// Therefore live portrait landmarks are rotated 90° clockwise for MODEL INPUT
+/// only, reproducing that successful landscape-left coordinate space.
+///
+/// Uploaded VIDEO-mode clips must not use this transform.
 class LiveLandmarkTransform {
   static (double, double) rotateXY(
     double x,
@@ -26,6 +29,19 @@ class LiveLandmarkTransform {
       default:
         return (x, y);
     }
+  }
+
+  static List<List<List<double>>> toTrainingLandscapeRawHands(
+    List<Hand> hands,
+  ) {
+    return hands.map((hand) {
+      return hand.landmarks.map((landmark) {
+        // Portrait device -> equivalent of physically rotating the phone
+        // landscape-left: image/model coordinates rotate clockwise 90°.
+        final (x, y) = rotateXY(landmark.x, landmark.y, 90);
+        return <double>[x, y, landmark.z];
+      }).toList();
+    }).toList();
   }
 
   static List<List<List<double>>> toUprightRawHands(
