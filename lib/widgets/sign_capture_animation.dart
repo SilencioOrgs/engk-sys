@@ -8,11 +8,15 @@ import '../utils/constants.dart';
 class SignGestureAnimation extends StatefulWidget {
   final bool darkMode;
   final Duration duration;
+  final String label;
+  final String? hint;
 
   const SignGestureAnimation({
     super.key,
     required this.darkMode,
     required this.duration,
+    this.label = 'Mag-sign na!',
+    this.hint,
   });
 
   @override
@@ -107,9 +111,24 @@ class _SignGestureAnimationState extends State<SignGestureAnimation>
             },
           ),
           const SizedBox(width: 12),
-          Text(
-            'Mag-sign na!',
-            style: TextStyle(color: blue, fontWeight: FontWeight.w600),
+          Flexible(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  widget.label,
+                  style: TextStyle(color: blue, fontWeight: FontWeight.w600),
+                ),
+                if (widget.hint != null) ...[
+                  const SizedBox(height: 4),
+                  Text(
+                    widget.hint!,
+                    style: TextStyle(color: blue, fontSize: 11),
+                  ),
+                ],
+              ],
+            ),
           ),
         ],
       ),

@@ -49,6 +49,8 @@ class _TestingModeScreenState extends State<TestingModeScreen> {
 
   // ── Landmark buffer ──
   final List<FrameLandmarks> _frameBuffer = [];
+  final List<int> _frameTimesMs = [];
+  final Stopwatch _windowClock = Stopwatch();
   StreamSubscription<List<Hand>>? _landmarkSub;
 
   // ── Capture state ──
@@ -76,7 +78,9 @@ class _TestingModeScreenState extends State<TestingModeScreen> {
   double _landmarkFps = 0;
   int _captureLandmarkCallbacks = 0;
   double _lastCaptureLandmarkFps = 0;
-  Stopwatch? _captureStopwatch;
+  int _lastCaptureWindowMs = 0;
+  int _captureActiveFrames = 0;
+  List<MapEntry<String, double>> _lastCaptureTop3 = const [];
   int _sensorOrientation = 0;
   Size _rawFrameSize = Size.zero;
   CameraLensDirection? _activeLensDirection;
@@ -110,7 +114,7 @@ class _TestingModeScreenState extends State<TestingModeScreen> {
   void dispose() {
     _debugTimer?.cancel();
     _captureTimer?.cancel();
-    _captureStopwatch?.stop();
+    _windowClock.stop();
     _latestHands.dispose();
     _landmarkSub?.cancel();
     _cameraController?.stopImageStream();
@@ -200,6 +204,7 @@ class _TestingModeScreenState extends State<TestingModeScreen> {
 
     if (!_isCapturing) return;
     _captureLandmarkCallbacks++;
+    final timestampMs = _windowClock.elapsedMilliseconds;
 
     if (hands.isEmpty) {
       _frameBuffer.add(const FrameLandmarks.noHand());
@@ -210,7 +215,9 @@ class _TestingModeScreenState extends State<TestingModeScreen> {
         rawFrameSize: _rawFrameSize,
       );
       _frameBuffer.add(FrameLandmarks(handDetected: true, hands: modelHands));
+      _captureActiveFrames++;
     }
+    _frameTimesMs.add(timestampMs);
   }
 
   // ──────────────────────────────────────────────────────────
@@ -240,6 +247,13 @@ class _TestingModeScreenState extends State<TestingModeScreen> {
         'x1=${x1.toStringAsFixed(4)} ($lower)';
   }
 
+  int get _captureWindowMs =>
+      _isCapturing ? _windowClock.elapsedMilliseconds : _lastCaptureWindowMs;
+
+  double get _captureWindowFps => _captureWindowMs > 0
+      ? _frameBuffer.length * 1000.0 / _captureWindowMs
+      : 0;
+
   void _handleNextGesture() {
     if (_isCapturing || !_cameraReady) return;
 
@@ -259,10 +273,15 @@ class _TestingModeScreenState extends State<TestingModeScreen> {
     });
 
     _frameBuffer.clear();
+    _frameTimesMs.clear();
     _captureLandmarkCallbacks = 0;
     _lastCaptureLandmarkFps = 0;
-    _captureStopwatch?.stop();
-    _captureStopwatch = Stopwatch()..start();
+    _lastCaptureWindowMs = 0;
+    _captureActiveFrames = 0;
+    _lastCaptureTop3 = const [];
+    _windowClock
+      ..reset()
+      ..start();
     _captureTimer = Timer(const Duration(seconds: 4), _onCaptureComplete);
   }
 
@@ -272,19 +291,30 @@ class _TestingModeScreenState extends State<TestingModeScreen> {
     // Freeze the bounded capture before inference so late landmark callbacks
     // cannot change the debug metrics or buffer for this test cycle.
     _isCapturing = false;
-    _captureStopwatch?.stop();
-    final captureElapsedMs = _captureStopwatch?.elapsedMilliseconds ?? 0;
+    _windowClock.stop();
+    final captureElapsedMs = _windowClock.elapsedMilliseconds;
+    _lastCaptureWindowMs = captureElapsedMs;
     _lastCaptureLandmarkFps = captureElapsedMs > 0
         ? _captureLandmarkCallbacks * 1000.0 / captureElapsedMs
         : 0;
     final buffer = List<FrameLandmarks>.from(_frameBuffer);
+    final times = List<int>.from(_frameTimesMs);
 
     // Measure only preprocessing + inference, not the 4-second capture.
     final sw = Stopwatch()..start();
-    final result = await _aiService.recognizeFromBuffer(buffer);
+    final result = await _aiService.recognizeFromBuffer(buffer, timestampsMs: times);
     sw.stop();
 
     if (!mounted) return;
+    _lastCaptureTop3 = List<MapEntry<String, double>>.from(_aiService.lastTop3);
+    if (kDebugMode) {
+      final top3 = _lastCaptureTop3
+          .map((entry) => '${entry.key}:${entry.value.toStringAsFixed(4)}')
+          .join(', ');
+      debugPrint('SIGN top3=[$top3] active=$_captureActiveFrames '
+          'fps=${_lastCaptureLandmarkFps.toStringAsFixed(2)} '
+          'window=${_lastCaptureWindowMs}ms');
+    }
 
     final detected = result?.sign ?? '(hindi natukoy)';
     final correct = detected == _expectedGesture;
@@ -1010,6 +1040,9 @@ class _TestingModeScreenState extends State<TestingModeScreen> {
                                       'Frames buffered: ${_frameBuffer.length}\n'
                                       'Capture callbacks: $_captureLandmarkCallbacks\n'
                                       'Last capture FPS: ${_lastCaptureLandmarkFps.toStringAsFixed(1)}\n'
+                                      'Window landmark FPS: ${_captureWindowFps.toStringAsFixed(1)}\n'
+                                      'Window length: ${_captureWindowMs}ms\n'
+                                      'Window active frames: $_captureActiveFrames\n'
                                       'sensorOrientation: $_sensorOrientation°\n'
                                       'Raw frame size: $_rawFrameSize\n'
                                       '$_liveTransformChecks\n'
@@ -1019,7 +1052,7 @@ class _TestingModeScreenState extends State<TestingModeScreen> {
                                       'activeRange: $_lastActiveRange\n'
                                       'mirrorInputX (model): ${TFLiteAIService.mirrorInputX}\n'
                                       'Live model space: upright, unmirrored, landscape-equivalent\n'
-                                      'lastTop3:',
+                                      'Last live top-3 (before threshold):',
                                       style: const TextStyle(
                                         color: Color(0xFFE2E8F0),
                                         fontSize: 11,
@@ -1028,7 +1061,7 @@ class _TestingModeScreenState extends State<TestingModeScreen> {
                                       ),
                                     ),
                                     const SizedBox(height: 4),
-                                    if (_aiService.lastTop3.isEmpty)
+                                    if (_lastCaptureTop3.isEmpty)
                                       const Text(
                                         '  (none yet)',
                                         style: TextStyle(
@@ -1038,7 +1071,7 @@ class _TestingModeScreenState extends State<TestingModeScreen> {
                                         ),
                                       )
                                     else
-                                      ..._aiService.lastTop3.map(
+                                      ..._lastCaptureTop3.map(
                                         (entry) => Text(
                                           '  • ${entry.key}: ${(entry.value * 100).toStringAsFixed(1)}% (${entry.value.toStringAsFixed(4)})',
                                           style: const TextStyle(

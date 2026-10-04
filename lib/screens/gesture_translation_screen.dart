@@ -21,11 +21,11 @@ import '../widgets/esenyas_app_bar.dart';
 import '../widgets/hand_landmark_overlay.dart';
 import '../widgets/sign_capture_animation.dart';
 
-enum SignPhase { idle, signing, analyzing }
+enum SignPhase { idle, ready, signing, analyzing }
 
 /// Gesture translation screen — the primary application feature.
 ///
-/// Recognition collects six-second windows from the live landmark stream.
+/// Recognition collects five-second windows after a two-second ready countdown.
 /// Only model input is transformed; the skeleton keeps raw sensor landmarks.
 
 class GestureTranslationScreen extends StatefulWidget {
@@ -64,12 +64,16 @@ class _GestureTranslationScreenState
   bool _isDetecting = false;
   SignPhase _phase = SignPhase.idle;
   final List<FrameLandmarks> _frameBuffer = [];
+  final List<int> _frameTimesMs = [];
+  final Stopwatch _windowClock = Stopwatch();
+  Timer? _readyTimer;
   Timer? _captureTimer;
   Timer? _analysisTimer;
   Timer? _nextSignTimer;
   int _cycleGeneration = 0;
   bool _showRetryMessage = false;
-  static const Duration _signDuration = Duration(seconds: 6);
+  static const Duration _readyDuration = Duration(seconds: 2);
+  static const Duration _signDuration = Duration(seconds: 5);
   static const Duration _minimumAnalysisDuration = Duration(milliseconds: 1200);
 
   String _currentSign = '';
@@ -107,6 +111,7 @@ class _GestureTranslationScreenState
   @override
   void dispose() {
     _cancelCycleTimers();
+    _windowClock.stop();
     _cycleGeneration++;
     _latestHands.dispose();
     _landmarkSub?.cancel();
@@ -189,6 +194,7 @@ class _GestureTranslationScreenState
     _latestHands.value = List<Hand>.unmodifiable(hands);
     if (!_isDetecting || _phase != SignPhase.signing) return;
 
+    final timestampMs = _windowClock.elapsedMilliseconds;
     _frameBuffer.add(
       hands.isEmpty
           ? const FrameLandmarks.noHand()
@@ -201,12 +207,15 @@ class _GestureTranslationScreenState
               ),
             ),
     );
+    _frameTimesMs.add(timestampMs);
   }
 
   void _cancelCycleTimers() {
+    _readyTimer?.cancel();
     _captureTimer?.cancel();
     _analysisTimer?.cancel();
     _nextSignTimer?.cancel();
+    _readyTimer = null;
     _captureTimer = null;
     _analysisTimer = null;
     _nextSignTimer = null;
@@ -215,10 +224,27 @@ class _GestureTranslationScreenState
   bool _isCurrentCycle(int generation) =>
       mounted && _isDetecting && generation == _cycleGeneration;
 
+  void _beginReadyWindow() {
+    if (!mounted || !_isDetecting) return;
+    _cancelCycleTimers();
+    _windowClock.stop();
+    _frameBuffer.clear();
+    _frameTimesMs.clear();
+    setState(() {
+      _phase = SignPhase.ready;
+      _showRetryMessage = false;
+    });
+    _readyTimer = Timer(_readyDuration, _beginSigningWindow);
+  }
+
   void _beginSigningWindow() {
     if (!mounted || !_isDetecting) return;
     _cancelCycleTimers();
     _frameBuffer.clear();
+    _frameTimesMs.clear();
+    _windowClock
+      ..reset()
+      ..start();
     setState(() {
       _phase = SignPhase.signing;
       _showRetryMessage = false;
@@ -230,8 +256,10 @@ class _GestureTranslationScreenState
     if (!mounted || !_isDetecting || _phase != SignPhase.signing) return;
     _captureTimer?.cancel();
     _captureTimer = null;
+    _windowClock.stop();
     final generation = _cycleGeneration;
     final snapshot = List<FrameLandmarks>.from(_frameBuffer);
+    final times = List<int>.from(_frameTimesMs);
     setState(() => _phase = SignPhase.analyzing);
     final stopwatch = Stopwatch()..start();
     DetectedSign? result;
@@ -239,7 +267,7 @@ class _GestureTranslationScreenState
       // Paint the loading state before synchronous TFLite inference begins.
       await WidgetsBinding.instance.endOfFrame;
       if (!_isCurrentCycle(generation)) return;
-      result = await _aiService.recognizeFromBuffer(snapshot);
+      result = await _aiService.recognizeFromBuffer(snapshot, timestampsMs: times);
     } catch (e) {
       debugPrint('Live landmark analysis failed: $e');
     }
@@ -265,22 +293,22 @@ class _GestureTranslationScreenState
             : '$_sentence ${result.sign}';
         _sessionSigns.add(result);
       });
-      _scheduleNextSigningWindow(generation);
+      _scheduleNextReadyWindow(generation);
     } else {
       setState(() => _showRetryMessage = true);
       _analysisTimer = Timer(const Duration(milliseconds: 1500), () {
         if (!_isCurrentCycle(generation)) return;
         _analysisTimer = null;
         setState(() => _showRetryMessage = false);
-        _scheduleNextSigningWindow(generation);
+        _scheduleNextReadyWindow(generation);
       });
     }
   }
 
-  void _scheduleNextSigningWindow(int generation) {
+  void _scheduleNextReadyWindow(int generation) {
     if (!_isCurrentCycle(generation)) return;
     _nextSignTimer = Timer(const Duration(milliseconds: 400), () {
-      if (_isCurrentCycle(generation)) _beginSigningWindow();
+      if (_isCurrentCycle(generation)) _beginReadyWindow();
     });
   }
 
@@ -297,13 +325,15 @@ class _GestureTranslationScreenState
       _isDetecting = true;
     });
     _sessionSigns.clear();
-    _beginSigningWindow();
+    _beginReadyWindow();
   }
 
   void _handleStop() {
     _cancelCycleTimers();
     _cycleGeneration++;
+    _windowClock.stop();
     _frameBuffer.clear();
+    _frameTimesMs.clear();
     setState(() {
       _isDetecting = false;
       _phase = SignPhase.idle;
@@ -840,10 +870,17 @@ class _GestureTranslationScreenState
                 child: AnimatedSwitcher(
                   duration: const Duration(milliseconds: 200),
                   child: switch (_phase) {
+                    SignPhase.ready => SignGestureAnimation(
+                      key: const ValueKey(SignPhase.ready),
+                      darkMode: darkMode,
+                      duration: _readyDuration,
+                      label: 'Humanda...',
+                    ),
                     SignPhase.signing => SignGestureAnimation(
                       key: const ValueKey(SignPhase.signing),
                       darkMode: darkMode,
                       duration: _signDuration,
+                      hint: 'Ibaba ang kamay pagkatapos',
                     ),
                     SignPhase.analyzing => AnalyzingAnimation(
                       key: const ValueKey(SignPhase.analyzing),
@@ -1151,6 +1188,10 @@ class _DetectionStatusPill extends StatelessWidget {
       text = statusText!;
     } else {
       switch (status) {
+        case 'ready':
+          dotColor = ESenyasColors.primaryBlue;
+          text = 'Humanda...';
+          break;
         case 'detected':
           dotColor = ESenyasColors.accentGreen;
           text = 'Natukoy: "$currentSign" — $confidence%';
@@ -1173,7 +1214,7 @@ class _DetectionStatusPill extends StatelessWidget {
       children: [
         _StatusDot(
           color: dotColor,
-          pulsing: status == 'signing' || status == 'analyzing',
+          pulsing: status == 'ready' || status == 'signing' || status == 'analyzing',
         ),
         const SizedBox(width: 8),
         Flexible(

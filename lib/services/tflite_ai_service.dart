@@ -102,6 +102,16 @@ class TFLiteAIService implements AIService {
     ];
     if (active.length < minActiveFrames) return null;
     final feats = [for (final f in buffer) frameFeatures(f, mirrorX: mirrorX)];
+    return _windowAndResample(feats);
+  }
+
+  /// Pads the active feature window and samples 45 frames by index.
+  static List<List<double>>? _windowAndResample(List<List<double>> feats) {
+    final active = [
+      for (var i = 0; i < feats.length; i++)
+        if (feats[i].any((v) => v != 0)) i,
+    ];
+    if (active.isEmpty) return null;
     final span = active.last - active.first + 1;
     final pad = (activePadding * span).round();
     final a = (active.first - pad).clamp(0, feats.length - 1);
@@ -111,6 +121,77 @@ class TFLiteAIService implements AIService {
       final idx = i == numFrames - 1 ? b : (a + i * step).floor();
       return feats[idx];
     });
+  }
+
+  /// Interpolates live features onto a uniform time grid before windowing.
+  static List<List<double>>? buildSequenceTimed(
+    List<FrameLandmarks> buffer,
+    List<int> timestampsMs, {
+    bool mirrorX = false,
+    double targetFps = 30.0,
+  }) {
+    if (buffer.length != timestampsMs.length || buffer.length < 2) {
+      return buildSequence(buffer, mirrorX: mirrorX);
+    }
+    final active = buffer.where((f) => f.handDetected && f.hands.isNotEmpty).length;
+    if (active < minActiveFrames) return null;
+    final feats = [for (final f in buffer) frameFeatures(f, mirrorX: mirrorX)];
+    return _windowAndResample(_toUniformGrid(feats, timestampsMs, targetFps));
+  }
+
+  static List<List<double>> _toUniformGrid(
+    List<List<double>> f,
+    List<int> ts,
+    double fps,
+  ) {
+    bool occ(List<double> v, int s) {
+      for (var k = s * 63; k < s * 63 + 63; k++) {
+        if (v[k] != 0) return true;
+      }
+      return false;
+    }
+
+    final step = 1000.0 / fps;
+    // Integer millisecond timestamps round a 30 fps grid by up to half a ms.
+    // Preserve those exact samples, including a rounded-down final endpoint.
+    const timestampToleranceMs = 0.5;
+    final t0 = ts.first.toDouble(), t1 = ts.last.toDouble();
+    final out = <List<double>>[];
+    for (var j = 0; t0 + j * step <= t1 + timestampToleranceMs + 1e-9; j++) {
+      final g = t0 + j * step;
+      var lo = 0, hi = ts.length - 1;
+      // Find the first index with ts[i] >= g.
+      while (lo < hi) {
+        final mid = (lo + hi) >> 1;
+        if (ts[mid] >= g) {
+          hi = mid;
+        } else {
+          lo = mid + 1;
+        }
+      }
+      final i1 = lo, i0 = i1 > 0 ? i1 - 1 : 0;
+      if ((ts[i1] - g).abs() <= timestampToleranceMs + 1e-9) {
+        out.add(f[i1]);
+        continue;
+      }
+      if ((g - ts[i0]).abs() <= timestampToleranceMs + 1e-9) {
+        out.add(f[i0]);
+        continue;
+      }
+      final a0 = occ(f[i0], 0), b0 = occ(f[i0], 1);
+      final a1 = occ(f[i1], 0), b1 = occ(f[i1], 1);
+      final dt = ts[i1] - ts[i0];
+      if (!(a0 || b0) || !(a1 || b1) || a0 != a1 || b0 != b1 || dt == 0) {
+        // Missing hand or a different hand set: use the nearest frame.
+        out.add((dt == 0 || (ts[i1] - g) < (g - ts[i0])) ? f[i1] : f[i0]);
+      } else {
+        final w = (g - ts[i0]) / dt;
+        out.add([
+          for (var k = 0; k < 126; k++) f[i0][k] * (1 - w) + f[i1][k] * w,
+        ]);
+      }
+    }
+    return out;
   }
 
   // ──────────────────────────────────────────────────────────
@@ -172,7 +253,10 @@ class TFLiteAIService implements AIService {
   /// predicted [DetectedSign], or null if:
   ///   - Buffer has fewer than [minActiveFrames] active frames, or
   ///   - Top softmax probability < [confidenceThreshold] (60%).
-  Future<DetectedSign?> recognizeFromBuffer(List<FrameLandmarks> buffer) async {
+  Future<DetectedSign?> recognizeFromBuffer(
+    List<FrameLandmarks> buffer, {
+    List<int>? timestampsMs,
+  }) async {
     if (_interpreter == null) return null;
 
     _lastBufferFrames = buffer.length;
@@ -189,7 +273,9 @@ class TFLiteAIService implements AIService {
       return null;
     }
 
-    final seq = buildSequence(buffer, mirrorX: mirrorInputX);
+    final seq = timestampsMs != null && timestampsMs.length == buffer.length
+        ? buildSequenceTimed(buffer, timestampsMs, mirrorX: mirrorInputX)
+        : buildSequence(buffer, mirrorX: mirrorInputX);
     if (seq == null) {
       _lastTop3 = const [];
       return null;
