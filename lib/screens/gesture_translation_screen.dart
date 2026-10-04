@@ -12,7 +12,6 @@ import '../providers/app_provider.dart';
 import '../services/tflite_ai_service.dart';
 import '../services/video_landmark_service.dart';
 import '../utils/constants.dart';
-import '../utils/live_landmark_transform.dart';
 import '../widgets/bottom_nav_bar.dart';
 import '../widgets/esenyas_app_bar.dart';
 import '../widgets/hand_landmark_overlay.dart';
@@ -187,10 +186,14 @@ class _GestureTranslationScreenState
     } else {
       // Convert hand_landmarker Hand/Landmark objects to raw doubles so
       // TFLiteAIService has no dependency on the plugin package.
-      final rawHands = LiveLandmarkTransform.toUprightRawHands(
-        hands,
-        _sensorOrientation,
-      );
+      // Keep model input in MediaPipe's raw camera/sensor coordinate space.
+      // This matches the landscape VIDEO-mode landmarks used by the Colab
+      // training/inference pipeline. Rotation/mirroring is display-only.
+      final rawHands = hands.map((hand) {
+        return hand.landmarks
+            .map((lm) => <double>[lm.x, lm.y, lm.z])
+            .toList();
+      }).toList();
 
       _frameBuffer.add(FrameLandmarks(handDetected: true, hands: rawHands));
     }
