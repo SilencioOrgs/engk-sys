@@ -258,9 +258,7 @@ class _GestureTranslationScreenState
       // "Upload test video", which already recognizes not.mp4 correctly.
       final analyzed = await _videoLandmarkService.analyzeVideo(
         clip.path,
-        // Matches the physical orientation that works on the test phone:
-        // selfie camera with the phone's top edge toward the user's left.
-        rotationDegrees: -90,
+        rotateClockwise90: true,
       );
       final result = await _aiService.recognizeFromBuffer(analyzed.frames);
 
