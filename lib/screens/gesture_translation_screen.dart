@@ -7,25 +7,24 @@ import 'package:hand_landmarker/hand_landmarker.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:provider/provider.dart';
 import '../models/detected_sign.dart';
-import '../models/frame_landmarks.dart';
 import '../providers/app_provider.dart';
 import '../services/tflite_ai_service.dart';
 import '../services/video_landmark_service.dart';
 import '../utils/constants.dart';
-import '../utils/live_landmark_transform.dart';
 import '../widgets/bottom_nav_bar.dart';
 import '../widgets/esenyas_app_bar.dart';
 import '../widgets/hand_landmark_overlay.dart';
 
 /// Gesture translation screen — the primary application feature.
 ///
-/// Implements a bounded 4-second capture loop that matches the training
-/// data format:
-///   1. User taps Start → camera streams to hand_landmarker plugin.
-///   2. Each 4-second window buffers [FrameLandmarks] from the landmark stream.
-///   3. After 4 s → preprocessing + TFLite inference → append word if
-///      confidence >= 60 %.
-///   4. Loop repeats automatically until Stop is tapped.
+/// Primary recognition path:
+///   1. User taps Record.
+///   2. The app records a ~4 second MP4 in landscape-left capture orientation
+///      while the Flutter UI remains portrait.
+///   3. The MP4 is analyzed with MediaPipe VIDEO mode.
+///   4. The resulting landmarks go through the same preprocessing + TFLite
+///      path as uploaded reference videos such as not.mp4.
+/// LIVE_STREAM landmarks are used only for the skeleton preview.
 class GestureTranslationScreen extends StatefulWidget {
   const GestureTranslationScreen({super.key});
 
@@ -52,23 +51,22 @@ class _GestureTranslationScreenState
   static const double _cameraHeightMax = 400.0;
   double _cameraHeight = ESenyasDimens.cameraPreviewHeight;
 
-  // ── Landmark buffer (populated from hand_landmarker stream) ──
-  final List<FrameLandmarks> _frameBuffer = [];
+  // ── Live landmarks are visualization-only on this screen ──
   StreamSubscription<List<Hand>>? _landmarkSub;
   final ValueNotifier<List<Hand>> _latestHands =
       ValueNotifier<List<Hand>>(const []);
 
-  // ── Capture-loop state ──
+  // ── Record → VIDEO-mode analysis state ──
   bool _isDetecting = false;
+  bool _isRecordingClip = false;
+  bool _isAnalyzingRecordedClip = false;
   Timer? _captureTimer;
-  Timer? _countdownTimer;
-  int _countdown = 0;
-  bool _isCountingDown = false;
+  static const Duration _recordDuration = Duration(seconds: 4);
 
   // ── Detection display ──
   String _currentSign = '';
   int _currentConfidence = 0;
-  /// idle | scanning | detected | countdown
+  /// idle | scanning | analyzing | detected
   String _detectionStatus = 'idle';
 
   // ── Sentence / session ──
@@ -102,7 +100,6 @@ class _GestureTranslationScreenState
 
   @override
   void dispose() {
-    _countdownTimer?.cancel();
     _captureTimer?.cancel();
     _latestHands.dispose();
     _landmarkSub?.cancel();
@@ -178,118 +175,195 @@ class _GestureTranslationScreenState
   // ──────────────────────────────────────────────────────────
 
   void _onLandmarks(List<Hand> hands) {
+    // Keep MediaPipe LIVE_STREAM only for the visual skeleton. Recognition
+    // deliberately bypasses this stream and analyzes a recorded MP4 instead.
     _latestHands.value = List<Hand>.unmodifiable(hands);
-
-    if (!_isDetecting || _isCountingDown) return;
-
-    if (hands.isEmpty) {
-      _frameBuffer.add(const FrameLandmarks.noHand());
-    } else {
-      // UI stays portrait, but the model receives landmarks in the same
-      // landscape-left orientation that was empirically verified to work when
-      // the physical phone is rotated with its top edge toward the user's left.
-      final modelHands =
-          LiveLandmarkTransform.toTrainingLandscapeRawHands(hands);
-
-      _frameBuffer.add(
-        FrameLandmarks(handDetected: true, hands: modelHands),
-      );
-    }
   }
 
   // ──────────────────────────────────────────────────────────
-  // Capture loop
+  // Record → analyze pipeline
   // ──────────────────────────────────────────────────────────
 
-  void _startCountdownCycle() {
-    _countdownTimer?.cancel();
-    _captureTimer?.cancel();
-    if (!mounted || !_isDetecting) return;
+  Future<void> _recordClipAndAnalyze() async {
+    final controller = _cameraController;
+    if (controller == null ||
+        !controller.value.isInitialized ||
+        _isDetecting ||
+        _isAnalyzingVideo) {
+      return;
+    }
 
-    _countdown = 3;
-    _isCountingDown = true;
     setState(() {
-      _detectionStatus = 'countdown';
+      _sentence = '';
+      _currentSign = '';
+      _currentConfidence = 0;
+      _feedbackValue = null;
+      _feedbackSubmitted = false;
+      _isDetecting = true;
+      _isRecordingClip = true;
+      _isAnalyzingRecordedClip = false;
+      _detectionStatus = 'scanning';
     });
+    _sessionSigns.clear();
 
-    _countdownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
-      if (!mounted || !_isDetecting) {
-        timer.cancel();
-        return;
+    try {
+      // Camera image streaming is only needed for the skeleton. Stop it while
+      // recording so the recorded MP4 becomes the single source of truth.
+      if (controller.value.isStreamingImages) {
+        await controller.stopImageStream();
       }
-      _countdown--;
-      if (_countdown <= 0) {
-        timer.cancel();
-        _isCountingDown = false;
-        _startCaptureCycle();
-      } else {
-        setState(() {});
-      }
-    });
+
+      // Keep the Flutter UI portrait, but encode the video in the same
+      // landscape-left orientation as the 16:9 Colab/reference clips.
+      await controller.lockCaptureOrientation(DeviceOrientation.landscapeLeft);
+      await controller.prepareForVideoRecording();
+      await controller.startVideoRecording();
+
+      _captureTimer = Timer(_recordDuration, _finishRecordedCapture);
+    } on CameraException catch (e) {
+      await _recoverAfterRecordedCapture();
+      if (!mounted) return;
+      setState(() {
+        _isDetecting = false;
+        _isRecordingClip = false;
+        _isAnalyzingRecordedClip = false;
+        _detectionStatus = 'idle';
+      });
+      debugPrint('Video capture start failed: ${e.code}: ${e.description}');
+    }
   }
 
-  void _startCaptureCycle() {
-    _frameBuffer.clear();
-    _isCountingDown = false;
-    if (mounted) setState(() => _detectionStatus = 'scanning');
-    _captureTimer = Timer(const Duration(seconds: 4), _onCaptureComplete);
-  }
-
-  Future<void> _onCaptureComplete() async {
-    if (!_isDetecting || !mounted) return;
-
-    // Snapshot the buffer and immediately start refilling for the next cycle.
-    final buffer = List<FrameLandmarks>.from(_frameBuffer);
-
-    final result = await _aiService.recognizeFromBuffer(buffer);
-
-    if (!mounted || !_isDetecting) return;
-
-    if (result != null) {
-      setState(() {
-        _currentSign = result.sign;
-        _currentConfidence = result.confidence;
-        _detectionStatus = 'detected';
-        _sentence =
-            _sentence.isEmpty ? result.sign : '$_sentence ${result.sign}';
-      });
-      _sessionSigns.add(result);
-    } else {
-      // Confidence below threshold — no word appended, stay in scanning state.
-      setState(() {
-        _detectionStatus = 'scanning';
-        _currentSign = '';
-        _currentConfidence = 0;
-      });
+  Future<void> _finishRecordedCapture() async {
+    final controller = _cameraController;
+    if (controller == null ||
+        !controller.value.isInitialized ||
+        !controller.value.isRecordingVideo) {
+      return;
     }
 
-    // Start 3-2-1 countdown before the next 4-second capture cycle.
-    if (_isDetecting && mounted) _startCountdownCycle();
+    _captureTimer?.cancel();
+    _captureTimer = null;
+
+    try {
+      final clip = await controller.stopVideoRecording();
+
+      if (!mounted) return;
+      setState(() {
+        _isRecordingClip = false;
+        _isAnalyzingRecordedClip = true;
+        _detectionStatus = 'analyzing';
+      });
+
+      // This is intentionally the exact same VIDEO-mode path used by
+      // "Upload test video", which already recognizes not.mp4 correctly.
+      final analyzed = await _videoLandmarkService.analyzeVideo(clip.path);
+      final result = await _aiService.recognizeFromBuffer(analyzed.frames);
+
+      if (!mounted) return;
+
+      if (result != null) {
+        setState(() {
+          _currentSign = result.sign;
+          _currentConfidence = result.confidence;
+          _sentence = result.sign;
+          _detectionStatus = 'detected';
+        });
+        _sessionSigns
+          ..clear()
+          ..add(result);
+      } else {
+        setState(() {
+          _currentSign = '';
+          _currentConfidence = 0;
+          _sentence = '';
+          _detectionStatus = 'idle';
+        });
+      }
+    } on CameraException catch (e) {
+      debugPrint('Video capture stop failed: ${e.code}: ${e.description}');
+      if (mounted) {
+        setState(() {
+          _currentSign = '';
+          _currentConfidence = 0;
+          _detectionStatus = 'idle';
+        });
+      }
+    } on PlatformException catch (e) {
+      debugPrint('Recorded-video analysis failed: ${e.code}: ${e.message}');
+      if (mounted) {
+        setState(() {
+          _currentSign = '';
+          _currentConfidence = 0;
+          _detectionStatus = 'idle';
+        });
+      }
+    } catch (e) {
+      debugPrint('Recorded-video analysis failed: $e');
+      if (mounted) {
+        setState(() {
+          _currentSign = '';
+          _currentConfidence = 0;
+          _detectionStatus = 'idle';
+        });
+      }
+    } finally {
+      await _recoverAfterRecordedCapture();
+      if (mounted) {
+        setState(() {
+          _isDetecting = false;
+          _isRecordingClip = false;
+          _isAnalyzingRecordedClip = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _recoverAfterRecordedCapture() async {
+    final controller = _cameraController;
+    if (controller == null || !controller.value.isInitialized) return;
+
+    try {
+      await controller.unlockCaptureOrientation();
+    } catch (_) {}
+
+    if (!controller.value.isStreamingImages &&
+        !controller.value.isRecordingVideo) {
+      try {
+        await _startCameraStream(controller);
+      } catch (e) {
+        debugPrint('Could not restart landmark preview stream: $e');
+      }
+    }
   }
 
   // ──────────────────────────────────────────────────────────
   // Button handlers
   // ──────────────────────────────────────────────────────────
 
-  void _handleStart() {
-    setState(() {
-      _sentence = '';
-      _currentSign = '';
-      _currentConfidence = 0;
-      _isDetecting = true;
-      _feedbackValue = null;
-      _feedbackSubmitted = false;
-    });
-    _sessionSigns.clear();
-    _startCountdownCycle();
+  Future<void> _handleStart() async {
+    await _recordClipAndAnalyze();
   }
 
-  void _handleStop() {
-    _countdownTimer?.cancel();
+  Future<void> _handleStop() async {
     _captureTimer?.cancel();
+    _captureTimer = null;
+
+    final controller = _cameraController;
+    if (controller != null &&
+        controller.value.isInitialized &&
+        controller.value.isRecordingVideo) {
+      try {
+        await controller.stopVideoRecording();
+      } catch (_) {}
+    }
+
+    await _recoverAfterRecordedCapture();
+
+    if (!mounted) return;
     setState(() {
       _isDetecting = false;
-      _isCountingDown = false;
+      _isRecordingClip = false;
+      _isAnalyzingRecordedClip = false;
       _detectionStatus = 'idle';
     });
   }
@@ -393,7 +467,7 @@ class _GestureTranslationScreenState
   }
 
   Future<void> _handleFlipCamera() async {
-    if (!_cameraReady) return;
+    if (!_cameraReady || _isDetecting || _isAnalyzingRecordedClip) return;
     final next = _lensDirection == CameraLensDirection.front
         ? CameraLensDirection.back
         : CameraLensDirection.front;
@@ -584,8 +658,8 @@ class _GestureTranslationScreenState
                                   currentSign: _currentSign,
                                   confidence: _currentConfidence,
                                   darkMode: darkMode,
-                                  statusText: _isCountingDown
-                                      ? 'Maghanda... $_countdown · kamay muna sa labas ng frame'
+                                  statusText: _isAnalyzingRecordedClip
+                                      ? 'Sinusuri ang na-record na video...'
                                       : null,
                                 ),
                                 const SizedBox(height: 8),
@@ -616,7 +690,7 @@ class _GestureTranslationScreenState
                                   children: [
                                     Expanded(
                                       child: _ActionButton(
-                                        label: 'Simulan',
+                                        label: 'I-record',
                                         icon: Icons.play_arrow,
                                         enabled: !_isDetecting && _cameraReady,
                                         color: ESenyasColors.accentGreen,
@@ -824,7 +898,7 @@ class _GestureTranslationScreenState
               ),
             ),
             // REC badge — reuses the "scanning/recording" visual from the old mock
-            if (_isDetecting)
+            if (_isRecordingClip)
               Positioned(
                 top: 36,
                 left: 12,
@@ -857,7 +931,7 @@ class _GestureTranslationScreenState
               top: 8,
               right: 8,
               child: GestureDetector(
-                onTap: _handleFlipCamera,
+                onTap: _isDetecting ? null : _handleFlipCamera,
                 child: Container(
                   padding: const EdgeInsets.all(6),
                   decoration: BoxDecoration(
