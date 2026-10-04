@@ -11,6 +11,7 @@ import '../services/tflite_ai_service.dart';
 import '../utils/constants.dart';
 import '../widgets/bottom_nav_bar.dart';
 import '../widgets/esenyas_app_bar.dart';
+import '../widgets/hand_landmark_overlay.dart';
 
 /// Gesture translation screen — the primary application feature.
 ///
@@ -48,6 +49,9 @@ class _GestureTranslationScreenState
   // ── Landmark buffer (populated from hand_landmarker stream) ──
   final List<FrameLandmarks> _frameBuffer = [];
   StreamSubscription<List<Hand>>? _landmarkSub;
+  final ValueNotifier<List<Hand>> _latestHands =
+      ValueNotifier<List<Hand>>(const []);
+  int _latestHandCount = 0;
 
   // ── Capture-loop state ──
   bool _isDetecting = false;
@@ -86,6 +90,7 @@ class _GestureTranslationScreenState
   void dispose() {
     _countdownTimer?.cancel();
     _captureTimer?.cancel();
+    _latestHands.dispose();
     _landmarkSub?.cancel();
     _cameraController?.stopImageStream();
     _cameraController?.dispose();
@@ -153,6 +158,9 @@ class _GestureTranslationScreenState
   // ──────────────────────────────────────────────────────────
 
   void _onLandmarks(List<Hand> hands) {
+    _latestHandCount = hands.length;
+    _latestHands.value = List<Hand>.unmodifiable(hands);
+
     if (!_isDetecting || _isCountingDown) return;
 
     if (hands.isEmpty) {
@@ -543,10 +551,41 @@ class _GestureTranslationScreenState
                 ),
               ),
             ),
+            Positioned.fill(
+              child: ValueListenableBuilder<List<Hand>>(
+                valueListenable: _latestHands,
+                builder: (context, hands, _) {
+                  return HandLandmarkOverlay(
+                    hands: hands,
+                    mirrorX: _lensDirection == CameraLensDirection.front,
+                  );
+                },
+              ),
+            ),
+            Positioned(
+              top: 10,
+              left: 12,
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
+                decoration: BoxDecoration(
+                  color: Colors.black54,
+                  borderRadius: BorderRadius.circular(4),
+                ),
+                child: Text(
+                  'Hands: $_latestHandCount',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 10,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ),
             // REC badge — reuses the "scanning/recording" visual from the old mock
             if (_isDetecting)
               Positioned(
-                top: 10,
+                top: 36,
                 left: 12,
                 child: Container(
                   padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
