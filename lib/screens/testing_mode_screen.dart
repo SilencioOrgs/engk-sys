@@ -11,6 +11,7 @@ import '../models/frame_landmarks.dart';
 import '../services/tflite_ai_service.dart';
 import '../services/video_landmark_service.dart';
 import '../utils/constants.dart';
+import '../utils/live_landmark_transform.dart';
 import '../widgets/bottom_nav_bar.dart';
 import '../widgets/esenyas_app_bar.dart';
 import '../widgets/hand_landmark_overlay.dart';
@@ -195,9 +196,10 @@ class _TestingModeScreenState extends State<TestingModeScreen> {
     if (hands.isEmpty) {
       _frameBuffer.add(const FrameLandmarks.noHand());
     } else {
-      final rawHands = hands.map((hand) {
-        return hand.landmarks.map((lm) => [lm.x, lm.y, lm.z]).toList();
-      }).toList();
+      final rawHands = LiveLandmarkTransform.toUprightRawHands(
+        hands,
+        _sensorOrientation,
+      );
       _frameBuffer.add(FrameLandmarks(handDetected: true, hands: rawHands));
     }
   }
@@ -1087,6 +1089,7 @@ class _TestingModeScreenState extends State<TestingModeScreen> {
                 return HandLandmarkOverlay(
                   hands: hands,
                   mirrorX: _activeLensDirection == CameraLensDirection.front,
+                  rotationDegrees: _sensorOrientation,
                 );
               },
             ),
