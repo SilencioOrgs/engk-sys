@@ -1,6 +1,7 @@
 package com.esenyas.esenyas
 
 import android.graphics.Bitmap
+import android.graphics.Matrix
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import com.google.mediapipe.framework.image.BitmapImageBuilder
@@ -37,10 +38,12 @@ class MainActivity : FlutterActivity() {
                 result.error("INVALID_PATH", "Video path is empty.", null)
                 return@setMethodCallHandler
             }
+            val rotateClockwise90 =
+                call.argument<Boolean>("rotateClockwise90") ?: false
 
             Thread {
                 try {
-                    val payload = analyzeVideo(path)
+                    val payload = analyzeVideo(path, rotateClockwise90)
                     runOnUiThread { result.success(payload) }
                 } catch (t: Throwable) {
                     runOnUiThread {
@@ -55,7 +58,10 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    private fun analyzeVideo(path: String): Map<String, Any> {
+    private fun analyzeVideo(
+        path: String,
+        rotateClockwise90: Boolean
+    ): Map<String, Any> {
         val retriever = MediaMetadataRetriever()
 
         val baseOptions = BaseOptions.builder()
@@ -112,8 +118,10 @@ class MainActivity : FlutterActivity() {
             ) ?: throw IllegalArgumentException(
                 "Could not decode the first video frame."
             )
-            val width = firstFrame.width
-            val height = firstFrame.height
+            val width =
+                if (rotateClockwise90) firstFrame.height else firstFrame.width
+            val height =
+                if (rotateClockwise90) firstFrame.width else firstFrame.height
             firstFrame.recycle()
 
             val frames =
@@ -139,7 +147,23 @@ class MainActivity : FlutterActivity() {
                     if (bitmap.config == Bitmap.Config.ARGB_8888) bitmap
                     else bitmap.copy(Bitmap.Config.ARGB_8888, false)
 
-                val mpImage = BitmapImageBuilder(argbFrame).build()
+                val analysisFrame =
+                    if (rotateClockwise90) {
+                        val matrix = Matrix().apply { postRotate(90f) }
+                        Bitmap.createBitmap(
+                            argbFrame,
+                            0,
+                            0,
+                            argbFrame.width,
+                            argbFrame.height,
+                            matrix,
+                            true
+                        )
+                    } else {
+                        argbFrame
+                    }
+
+                val mpImage = BitmapImageBuilder(analysisFrame).build()
                 try {
                     val detection =
                         landmarker.detectForVideo(mpImage, timestampMs)
@@ -158,6 +182,7 @@ class MainActivity : FlutterActivity() {
                     frames.add(hands)
                 } finally {
                     mpImage.close()
+                    if (analysisFrame !== argbFrame) analysisFrame.recycle()
                     if (argbFrame !== bitmap) argbFrame.recycle()
                     bitmap.recycle()
                 }
