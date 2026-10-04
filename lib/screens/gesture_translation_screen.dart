@@ -19,8 +19,8 @@ import '../widgets/hand_landmark_overlay.dart';
 ///
 /// Primary recognition path:
 ///   1. User taps Record.
-///   2. The app records a ~4 second MP4 in landscape-left capture orientation
-///      while the Flutter UI remains portrait.
+///   2. The app records a ~4 second MP4 while the Flutter UI remains portrait.
+///      The recorded clip is rotated only inside the offline analyzer.
 ///   3. The MP4 is analyzed with MediaPipe VIDEO mode.
 ///   4. The resulting landmarks go through the same preprocessing + TFLite
 ///      path as uploaded reference videos such as not.mp4.
@@ -213,9 +213,9 @@ class _GestureTranslationScreenState
         await controller.stopImageStream();
       }
 
-      // Keep the Flutter UI portrait, but encode the video in the same
-      // landscape-left orientation as the 16:9 Colab/reference clips.
-      await controller.lockCaptureOrientation(DeviceOrientation.landscapeLeft);
+      // Keep the device/UI portrait while recording. We rotate the recorded
+      // clip only inside the offline analyzer so the preview never turns
+      // sideways.
       await controller.prepareForVideoRecording();
       await controller.startVideoRecording();
 
@@ -256,7 +256,10 @@ class _GestureTranslationScreenState
 
       // This is intentionally the exact same VIDEO-mode path used by
       // "Upload test video", which already recognizes not.mp4 correctly.
-      final analyzed = await _videoLandmarkService.analyzeVideo(clip.path);
+      final analyzed = await _videoLandmarkService.analyzeVideo(
+        clip.path,
+        rotateClockwise90: true,
+      );
       final result = await _aiService.recognizeFromBuffer(analyzed.frames);
 
       if (!mounted) return;
@@ -321,10 +324,6 @@ class _GestureTranslationScreenState
   Future<void> _recoverAfterRecordedCapture() async {
     final controller = _cameraController;
     if (controller == null || !controller.value.isInitialized) return;
-
-    try {
-      await controller.unlockCaptureOrientation();
-    } catch (_) {}
 
     if (!controller.value.isStreamingImages &&
         !controller.value.isRecordingVideo) {
@@ -842,13 +841,7 @@ class _GestureTranslationScreenState
                     child: SizedBox(
                       width: _cameraController!.value.previewSize!.height,
                       height: _cameraController!.value.previewSize!.width,
-                      child: _lensDirection == CameraLensDirection.front
-                          ? Transform(
-                              alignment: Alignment.center,
-                              transform: Matrix4.diagonal3Values(-1, 1, 1),
-                              child: CameraPreview(_cameraController!),
-                            )
-                          : CameraPreview(_cameraController!),
+                      child: CameraPreview(_cameraController!),
                     ),
                   ),
                 ),
@@ -858,19 +851,12 @@ class _GestureTranslationScreenState
               child: ValueListenableBuilder<List<Hand>>(
                 valueListenable: _latestHands,
                 builder: (context, hands, _) {
-                  final overlay = HandLandmarkOverlay(
+                  return HandLandmarkOverlay(
                     hands: hands,
                     previewSize: _cameraController!.value.previewSize!,
                     lensDirection: _lensDirection,
                     sensorOrientation: _sensorOrientation,
                   );
-                  return _lensDirection == CameraLensDirection.front
-                      ? Transform(
-                          alignment: Alignment.center,
-                          transform: Matrix4.diagonal3Values(-1, 1, 1),
-                          child: overlay,
-                        )
-                      : overlay;
                 },
               ),
             ),
