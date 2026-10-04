@@ -307,7 +307,7 @@ class _TestingModeScreenState extends State<TestingModeScreen> {
         controller != null && controller.value.isStreamingImages;
 
     try {
-      if (restartCamera) {
+      if (restartCamera && controller != null) {
         await controller.stopImageStream();
       }
 
