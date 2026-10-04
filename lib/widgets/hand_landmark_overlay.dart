@@ -1,34 +1,38 @@
+import 'dart:math' as math;
+
+import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:hand_landmarker/hand_landmarker.dart';
 
-import '../utils/live_landmark_transform.dart';
-
-/// Paints the exact MediaPipe landmarks received by the app.
+/// Draws MediaPipe landmarks in the same sensor-space transform used by the
+/// hand_landmarker package example, adapted for a BoxFit.cover camera preview.
 ///
-/// MediaPipe x/y landmarks are normalized to 0..1. [mirrorX] is display-only
-/// and never changes the coordinates sent to the classifier.
+/// This is display-only. Model-input normalization happens separately.
 class HandLandmarkOverlay extends StatelessWidget {
   final List<Hand> hands;
-  final bool mirrorX;
-  final int rotationDegrees;
+  final Size previewSize;
+  final CameraLensDirection lensDirection;
+  final int sensorOrientation;
 
   const HandLandmarkOverlay({
     super.key,
     required this.hands,
-    required this.mirrorX,
-    required this.rotationDegrees,
+    required this.previewSize,
+    required this.lensDirection,
+    required this.sensorOrientation,
   });
 
   @override
   Widget build(BuildContext context) {
     return IgnorePointer(
       child: CustomPaint(
+        size: Size.infinite,
         painter: _HandLandmarkPainter(
           hands: hands,
-          mirrorX: mirrorX,
-          rotationDegrees: rotationDegrees,
+          previewSize: previewSize,
+          lensDirection: lensDirection,
+          sensorOrientation: sensorOrientation,
         ),
-        size: Size.infinite,
       ),
     );
   }
@@ -45,42 +49,32 @@ class _HandLandmarkPainter extends CustomPainter {
   ];
 
   final List<Hand> hands;
-  final bool mirrorX;
-  final int rotationDegrees;
+  final Size previewSize;
+  final CameraLensDirection lensDirection;
+  final int sensorOrientation;
 
   _HandLandmarkPainter({
     required this.hands,
-    required this.mirrorX,
-    required this.rotationDegrees,
+    required this.previewSize,
+    required this.lensDirection,
+    required this.sensorOrientation,
   });
 
   @override
   void paint(Canvas canvas, Size size) {
-    if (hands.isEmpty || size.isEmpty) return;
+    if (hands.isEmpty || size.isEmpty || previewSize.isEmpty) return;
 
-    Offset mapPoint(Landmark landmark) {
-      final (uprightX, uprightY) = LiveLandmarkTransform.rotateXY(
-        landmark.x,
-        landmark.y,
-        rotationDegrees,
-      );
-      final x = (mirrorX ? 1.0 - uprightX : uprightX).clamp(0.0, 1.0);
-      final y = uprightY.clamp(0.0, 1.0);
-      return Offset(x * size.width, y * size.height);
-    }
+    // CameraPreview is rendered upright with width=previewSize.height and
+    // height=previewSize.width, then center-cropped with BoxFit.cover.
+    final displayedSourceWidth = previewSize.height;
+    final displayedSourceHeight = previewSize.width;
+    final scale = math.max(
+      size.width / displayedSourceWidth,
+      size.height / displayedSourceHeight,
+    );
 
-    final shadowPaint = Paint()
-      ..color = Colors.black.withValues(alpha: 0.55)
-      ..strokeWidth = 5
-      ..strokeCap = StrokeCap.round;
-
-    final linePaint = Paint()
-      ..color = Colors.white
-      ..strokeWidth = 2.2
-      ..strokeCap = StrokeCap.round;
-
-    final borderPaint = Paint()
-      ..color = Colors.black.withValues(alpha: 0.6)
+    final pointBorder = Paint()
+      ..color = Colors.black.withValues(alpha: 0.60)
       ..style = PaintingStyle.fill;
 
     final pointPaint = Paint()
@@ -91,47 +85,71 @@ class _HandLandmarkPainter extends CustomPainter {
       ..color = const Color(0xFFFACC15)
       ..style = PaintingStyle.fill;
 
+    final lineShadow = Paint()
+      ..color = Colors.black.withValues(alpha: 0.55)
+      ..strokeWidth = 5 / scale
+      ..strokeCap = StrokeCap.round;
+
+    final linePaint = Paint()
+      ..color = Colors.white
+      ..strokeWidth = 2.2 / scale
+      ..strokeCap = StrokeCap.round;
+
+    canvas.save();
+
+    // Match the transform used by hand_landmarker/example/lib/main.dart.
+    final center = Offset(size.width / 2, size.height / 2);
+    canvas.translate(center.dx, center.dy);
+    canvas.rotate(sensorOrientation * math.pi / 180);
+
+    if (lensDirection == CameraLensDirection.front) {
+      canvas.scale(-1, 1);
+      canvas.rotate(math.pi);
+    }
+
+    canvas.scale(scale);
+
+    final logicalWidth = previewSize.width;
+    final logicalHeight = previewSize.height;
+
+    Offset pointFor(Landmark landmark) {
+      return Offset(
+        (landmark.x - 0.5) * logicalWidth,
+        (landmark.y - 0.5) * logicalHeight,
+      );
+    }
+
     for (var handIndex = 0; handIndex < hands.length; handIndex++) {
       final landmarks = hands[handIndex].landmarks;
       if (landmarks.length < 21) continue;
 
-      final points = landmarks.map(mapPoint).toList(growable: false);
+      final points = landmarks.map(pointFor).toList(growable: false);
 
       for (final (from, to) in _connections) {
-        canvas.drawLine(points[from], points[to], shadowPaint);
+        canvas.drawLine(points[from], points[to], lineShadow);
         canvas.drawLine(points[from], points[to], linePaint);
       }
 
       for (var i = 0; i < points.length; i++) {
-        canvas.drawCircle(points[i], i == 0 ? 6.5 : 5.0, borderPaint);
+        final outerRadius = (i == 0 ? 6.5 : 5.0) / scale;
+        final innerRadius = (i == 0 ? 4.8 : 3.4) / scale;
+        canvas.drawCircle(points[i], outerRadius, pointBorder);
         canvas.drawCircle(
           points[i],
-          i == 0 ? 4.8 : 3.4,
+          innerRadius,
           i == 0 ? wristPaint : pointPaint,
         );
       }
-
-      final wrist = points[0];
-      final label = TextPainter(
-        text: TextSpan(
-          text: 'H${handIndex + 1}',
-          style: const TextStyle(
-            color: Colors.white,
-            fontSize: 11,
-            fontWeight: FontWeight.bold,
-            shadows: [Shadow(blurRadius: 3, color: Colors.black)],
-          ),
-        ),
-        textDirection: TextDirection.ltr,
-      )..layout();
-      label.paint(canvas, wrist + const Offset(8, -18));
     }
+
+    canvas.restore();
   }
 
   @override
   bool shouldRepaint(covariant _HandLandmarkPainter oldDelegate) {
     return oldDelegate.hands != hands ||
-        oldDelegate.mirrorX != mirrorX ||
-        oldDelegate.rotationDegrees != rotationDegrees;
+        oldDelegate.previewSize != previewSize ||
+        oldDelegate.lensDirection != lensDirection ||
+        oldDelegate.sensorOrientation != sensorOrientation;
   }
 }
