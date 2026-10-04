@@ -66,13 +66,13 @@ class VideoLandmarkService {
 
   Future<VideoLandmarkResult> analyzeVideo(
     String path, {
-    bool rotateClockwise90 = false,
+    int rotationDegrees = 0,
   }) async {
     final result = await _channel.invokeMethod<Map<dynamic, dynamic>>(
       'analyzeVideo',
       {
         'path': path,
-        'rotateClockwise90': rotateClockwise90,
+        'rotationDegrees': rotationDegrees,
       },
     );
 
