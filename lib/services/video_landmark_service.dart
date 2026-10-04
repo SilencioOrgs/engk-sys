@@ -64,10 +64,16 @@ class VideoLandmarkService {
   static const MethodChannel _channel =
       MethodChannel('esenyas/video_landmarks');
 
-  Future<VideoLandmarkResult> analyzeVideo(String path) async {
+  Future<VideoLandmarkResult> analyzeVideo(
+    String path, {
+    bool rotateClockwise90 = false,
+  }) async {
     final result = await _channel.invokeMethod<Map<dynamic, dynamic>>(
       'analyzeVideo',
-      {'path': path},
+      {
+        'path': path,
+        'rotateClockwise90': rotateClockwise90,
+      },
     );
 
     if (result == null) {
