@@ -1,3 +1,6 @@
+// Retain the uploaded-video path's existing explicit camera null guards.
+// ignore_for_file: unnecessary_null_comparison
+
 import 'dart:async';
 import 'dart:math';
 import 'package:camera/camera.dart';
@@ -75,6 +78,7 @@ class _TestingModeScreenState extends State<TestingModeScreen> {
   double _lastCaptureLandmarkFps = 0;
   Stopwatch? _captureStopwatch;
   int _sensorOrientation = 0;
+  Size _rawFrameSize = Size.zero;
   CameraLensDirection? _activeLensDirection;
   Timer? _debugTimer;
 
@@ -143,11 +147,13 @@ class _TestingModeScreenState extends State<TestingModeScreen> {
 
     final controller = CameraController(
       front,
-      ResolutionPreset.medium,
+      // If landmark FPS drops below ~15, go back to medium (model tolerates it).
+      ResolutionPreset.high,
       enableAudio: false,
       imageFormatGroup: ImageFormatGroup.yuv420,
     );
     await controller.initialize();
+    _sensorOrientation = controller.description.sensorOrientation;
     await _startCameraStream(controller);
 
     if (mounted) {
@@ -163,6 +169,7 @@ class _TestingModeScreenState extends State<TestingModeScreen> {
   Future<void> _startCameraStream(CameraController controller) async {
     if (controller.value.isStreamingImages) return;
     await controller.startImageStream((CameraImage image) {
+      _rawFrameSize = Size(image.width.toDouble(), image.height.toDouble());
       _aiService.handPlugin.processFrame(
         image,
         controller.description.sensorOrientation,
@@ -175,6 +182,7 @@ class _TestingModeScreenState extends State<TestingModeScreen> {
   // ──────────────────────────────────────────────────────────
 
   void _onLandmarks(List<Hand> hands) {
+    if (!mounted) return;
     _latestHandCount = hands.length;
     _latestHands.value = List<Hand>.unmodifiable(hands);
 
@@ -196,19 +204,41 @@ class _TestingModeScreenState extends State<TestingModeScreen> {
     if (hands.isEmpty) {
       _frameBuffer.add(const FrameLandmarks.noHand());
     } else {
-      // Keep the screen portrait while giving the model the same coordinates
-      // as the successful physical landscape-left device orientation.
-      final modelHands =
-          LiveLandmarkTransform.toTrainingLandscapeRawHands(hands);
-      _frameBuffer.add(
-        FrameLandmarks(handDetected: true, hands: modelHands),
+      final modelHands = LiveLandmarkTransform.toTrainingSpace(
+        hands,
+        sensorOrientation: _sensorOrientation,
+        rawFrameSize: _rawFrameSize,
       );
+      _frameBuffer.add(FrameLandmarks(handDetected: true, hands: modelHands));
     }
   }
 
   // ──────────────────────────────────────────────────────────
   // Button handlers
   // ──────────────────────────────────────────────────────────
+
+  String get _liveTransformChecks {
+    if (!kDebugMode || _latestHands.value.isEmpty || _rawFrameSize.isEmpty) {
+      return 'Upright check: — (point index finger up)\nOrder check: —';
+    }
+    final hands = LiveLandmarkTransform.toTrainingSpace(
+      _latestHands.value,
+      sensorOrientation: _sensorOrientation,
+      rawFrameSize: _rawFrameSize,
+    );
+    final dy = hands.first[8][1] - hands.first[0][1];
+    final upright =
+        'Upright check: dy=${dy.toStringAsFixed(4)} '
+        '${dy < 0 ? "OK" : "check"} (when index points up)';
+    if (hands.length < 2) return '$upright\nOrder check: — (need 2 hands)';
+    final x0 = hands[0][0][0];
+    final x1 = hands[1][0][0];
+    final lower = x0 == x1
+        ? 'equal'
+        : (x0 < x1 ? 'hand 0 lower' : 'hand 1 lower');
+    return '$upright\nOrder check: x0=${x0.toStringAsFixed(4)}, '
+        'x1=${x1.toStringAsFixed(4)} ($lower)';
+  }
 
   void _handleNextGesture() {
     if (_isCapturing || !_cameraReady) return;
@@ -980,13 +1010,15 @@ class _TestingModeScreenState extends State<TestingModeScreen> {
                                       'Frames buffered: ${_frameBuffer.length}\n'
                                       'Capture callbacks: $_captureLandmarkCallbacks\n'
                                       'Last capture FPS: ${_lastCaptureLandmarkFps.toStringAsFixed(1)}\n'
-                                      'Sensor orientation: $_sensorOrientation°\n'
+                                      'sensorOrientation: $_sensorOrientation°\n'
+                                      'Raw frame size: $_rawFrameSize\n'
+                                      '$_liveTransformChecks\n'
                                       'Lens: ${_activeLensDirection?.name ?? "unknown"}\n'
                                       'lastBufferFrames: ${_aiService.lastBufferFrames}\n'
                                       'lastActiveFrames: ${_aiService.lastActiveFrames}\n'
                                       'activeRange: $_lastActiveRange\n'
                                       'mirrorInputX (model): ${TFLiteAIService.mirrorInputX}\n'
-                                      'live model rotation: CW 90° (landscape-left equivalent)\n'
+                                      'Live model space: upright, unmirrored, landscape-equivalent\n'
                                       'lastTop3:',
                                       style: const TextStyle(
                                         color: Color(0xFFE2E8F0),

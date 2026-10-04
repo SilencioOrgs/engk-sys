@@ -1,3 +1,6 @@
+// Retain the uploaded-video path's existing explicit camera null guards.
+// ignore_for_file: unnecessary_null_comparison
+
 import 'dart:async';
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
@@ -7,24 +10,24 @@ import 'package:hand_landmarker/hand_landmarker.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:provider/provider.dart';
 import '../models/detected_sign.dart';
+import '../models/frame_landmarks.dart';
 import '../providers/app_provider.dart';
 import '../services/tflite_ai_service.dart';
 import '../services/video_landmark_service.dart';
 import '../utils/constants.dart';
+import '../utils/live_landmark_transform.dart';
 import '../widgets/bottom_nav_bar.dart';
 import '../widgets/esenyas_app_bar.dart';
 import '../widgets/hand_landmark_overlay.dart';
+import '../widgets/sign_capture_animation.dart';
+
+enum SignPhase { idle, signing, analyzing }
 
 /// Gesture translation screen — the primary application feature.
 ///
-/// Primary recognition path:
-///   1. User taps Record.
-///   2. The app records a ~4 second MP4 while the Flutter UI remains portrait.
-///      The recorded clip is rotated only inside the offline analyzer.
-///   3. The MP4 is analyzed with MediaPipe VIDEO mode.
-///   4. The resulting landmarks go through the same preprocessing + TFLite
-///      path as uploaded reference videos such as not.mp4.
-/// LIVE_STREAM landmarks are used only for the skeleton preview.
+/// Recognition collects six-second windows from the live landmark stream.
+/// Only model input is transformed; the skeleton keeps raw sensor landmarks.
+
 class GestureTranslationScreen extends StatefulWidget {
   const GestureTranslationScreen({super.key});
 
@@ -45,29 +48,32 @@ class _GestureTranslationScreenState
   bool _permissionGranted = true; // optimistic until runtime check
   CameraLensDirection _lensDirection = CameraLensDirection.front;
   int _sensorOrientation = 0;
+  Size _rawFrameSize = Size.zero;
 
   // ── Dynamic camera frame height ──
   static const double _cameraHeightMin = 140.0;
   static const double _cameraHeightMax = 400.0;
   double _cameraHeight = ESenyasDimens.cameraPreviewHeight;
 
-  // ── Live landmarks are visualization-only on this screen ──
+  // ── Live landmarks ──
   StreamSubscription<List<Hand>>? _landmarkSub;
   final ValueNotifier<List<Hand>> _latestHands =
       ValueNotifier<List<Hand>>(const []);
 
-  // ── Record → VIDEO-mode analysis state ──
+  // Sign and analyze cycle.
   bool _isDetecting = false;
-  bool _isRecordingClip = false;
-  bool _isAnalyzingRecordedClip = false;
+  SignPhase _phase = SignPhase.idle;
+  final List<FrameLandmarks> _frameBuffer = [];
   Timer? _captureTimer;
-  static const Duration _recordDuration = Duration(seconds: 4);
+  Timer? _analysisTimer;
+  Timer? _nextSignTimer;
+  int _cycleGeneration = 0;
+  bool _showRetryMessage = false;
+  static const Duration _signDuration = Duration(seconds: 6);
+  static const Duration _minimumAnalysisDuration = Duration(milliseconds: 1200);
 
-  // ── Detection display ──
   String _currentSign = '';
   int _currentConfidence = 0;
-  /// idle | scanning | analyzing | detected
-  String _detectionStatus = 'idle';
 
   // ── Sentence / session ──
   String _sentence = '';
@@ -100,7 +106,8 @@ class _GestureTranslationScreenState
 
   @override
   void dispose() {
-    _captureTimer?.cancel();
+    _cancelCycleTimers();
+    _cycleGeneration++;
     _latestHands.dispose();
     _landmarkSub?.cancel();
     _cameraController?.stopImageStream();
@@ -141,11 +148,13 @@ class _GestureTranslationScreenState
 
     final controller = CameraController(
       desc,
-      ResolutionPreset.medium,
+      ResolutionPreset.high,
       enableAudio: false,
       imageFormatGroup: ImageFormatGroup.yuv420,
     );
     await controller.initialize();
+
+    _sensorOrientation = controller.description.sensorOrientation;
 
     // Feed every camera frame to the hand landmarker (fire-and-forget).
     await _startCameraStream(controller);
@@ -163,6 +172,7 @@ class _GestureTranslationScreenState
   Future<void> _startCameraStream(CameraController controller) async {
     if (controller.value.isStreamingImages) return;
     await controller.startImageStream((CameraImage image) {
+      _rawFrameSize = Size(image.width.toDouble(), image.height.toDouble());
       _aiService.handPlugin.processFrame(
         image,
         controller.description.sensorOrientation,
@@ -175,24 +185,109 @@ class _GestureTranslationScreenState
   // ──────────────────────────────────────────────────────────
 
   void _onLandmarks(List<Hand> hands) {
-    // Keep MediaPipe LIVE_STREAM only for the visual skeleton. Recognition
-    // deliberately bypasses this stream and analyzes a recorded MP4 instead.
+    if (!mounted) return;
     _latestHands.value = List<Hand>.unmodifiable(hands);
+    if (!_isDetecting || _phase != SignPhase.signing) return;
+
+    _frameBuffer.add(
+      hands.isEmpty
+          ? const FrameLandmarks.noHand()
+          : FrameLandmarks(
+              handDetected: true,
+              hands: LiveLandmarkTransform.toTrainingSpace(
+                hands,
+                sensorOrientation: _sensorOrientation,
+                rawFrameSize: _rawFrameSize,
+              ),
+            ),
+    );
   }
 
-  // ──────────────────────────────────────────────────────────
-  // Record → analyze pipeline
-  // ──────────────────────────────────────────────────────────
+  void _cancelCycleTimers() {
+    _captureTimer?.cancel();
+    _analysisTimer?.cancel();
+    _nextSignTimer?.cancel();
+    _captureTimer = null;
+    _analysisTimer = null;
+    _nextSignTimer = null;
+  }
 
-  Future<void> _recordClipAndAnalyze() async {
-    final controller = _cameraController;
-    if (controller == null ||
-        !controller.value.isInitialized ||
-        _isDetecting ||
-        _isAnalyzingVideo) {
-      return;
+  bool _isCurrentCycle(int generation) =>
+      mounted && _isDetecting && generation == _cycleGeneration;
+
+  void _beginSigningWindow() {
+    if (!mounted || !_isDetecting) return;
+    _cancelCycleTimers();
+    _frameBuffer.clear();
+    setState(() {
+      _phase = SignPhase.signing;
+      _showRetryMessage = false;
+    });
+    _captureTimer = Timer(_signDuration, _finishSigningWindow);
+  }
+
+  Future<void> _finishSigningWindow() async {
+    if (!mounted || !_isDetecting || _phase != SignPhase.signing) return;
+    _captureTimer?.cancel();
+    _captureTimer = null;
+    final generation = _cycleGeneration;
+    final snapshot = List<FrameLandmarks>.from(_frameBuffer);
+    setState(() => _phase = SignPhase.analyzing);
+    final stopwatch = Stopwatch()..start();
+    DetectedSign? result;
+    try {
+      // Paint the loading state before synchronous TFLite inference begins.
+      await WidgetsBinding.instance.endOfFrame;
+      if (!_isCurrentCycle(generation)) return;
+      result = await _aiService.recognizeFromBuffer(snapshot);
+    } catch (e) {
+      debugPrint('Live landmark analysis failed: $e');
     }
+    stopwatch.stop();
+    if (!_isCurrentCycle(generation)) return;
 
+    final remaining = _minimumAnalysisDuration - stopwatch.elapsed;
+    _analysisTimer = Timer(
+      remaining.isNegative ? Duration.zero : remaining,
+      () => _completeSigningAnalysis(result, generation),
+    );
+  }
+
+  void _completeSigningAnalysis(DetectedSign? result, int generation) {
+    if (!_isCurrentCycle(generation)) return;
+    _analysisTimer = null;
+    if (result != null) {
+      setState(() {
+        _currentSign = result.sign;
+        _currentConfidence = result.confidence;
+        _sentence = _sentence.isEmpty
+            ? result.sign
+            : '$_sentence ${result.sign}';
+        _sessionSigns.add(result);
+      });
+      _scheduleNextSigningWindow(generation);
+    } else {
+      setState(() => _showRetryMessage = true);
+      _analysisTimer = Timer(const Duration(milliseconds: 1500), () {
+        if (!_isCurrentCycle(generation)) return;
+        _analysisTimer = null;
+        setState(() => _showRetryMessage = false);
+        _scheduleNextSigningWindow(generation);
+      });
+    }
+  }
+
+  void _scheduleNextSigningWindow(int generation) {
+    if (!_isCurrentCycle(generation)) return;
+    _nextSignTimer = Timer(const Duration(milliseconds: 400), () {
+      if (_isCurrentCycle(generation)) _beginSigningWindow();
+    });
+  }
+
+  // Button handlers.
+  void _handleStart() {
+    if (!_cameraReady || _isDetecting || _isAnalyzingVideo) return;
+    _cycleGeneration++;
     setState(() {
       _sentence = '';
       _currentSign = '';
@@ -200,170 +295,19 @@ class _GestureTranslationScreenState
       _feedbackValue = null;
       _feedbackSubmitted = false;
       _isDetecting = true;
-      _isRecordingClip = true;
-      _isAnalyzingRecordedClip = false;
-      _detectionStatus = 'scanning';
     });
     _sessionSigns.clear();
-
-    try {
-      // Camera image streaming is only needed for the skeleton. Stop it while
-      // recording so the recorded MP4 becomes the single source of truth.
-      if (controller.value.isStreamingImages) {
-        await controller.stopImageStream();
-      }
-
-      // Keep the device/UI portrait while recording. We rotate the recorded
-      // clip only inside the offline analyzer so the preview never turns
-      // sideways.
-      await controller.prepareForVideoRecording();
-      await controller.startVideoRecording();
-
-      _captureTimer = Timer(_recordDuration, _finishRecordedCapture);
-    } on CameraException catch (e) {
-      await _recoverAfterRecordedCapture();
-      if (!mounted) return;
-      setState(() {
-        _isDetecting = false;
-        _isRecordingClip = false;
-        _isAnalyzingRecordedClip = false;
-        _detectionStatus = 'idle';
-      });
-      debugPrint('Video capture start failed: ${e.code}: ${e.description}');
-    }
+    _beginSigningWindow();
   }
 
-  Future<void> _finishRecordedCapture() async {
-    final controller = _cameraController;
-    if (controller == null ||
-        !controller.value.isInitialized ||
-        !controller.value.isRecordingVideo) {
-      return;
-    }
-
-    _captureTimer?.cancel();
-    _captureTimer = null;
-
-    try {
-      final clip = await controller.stopVideoRecording();
-
-      if (!mounted) return;
-      setState(() {
-        _isRecordingClip = false;
-        _isAnalyzingRecordedClip = true;
-        _detectionStatus = 'analyzing';
-      });
-
-      // This is intentionally the exact same VIDEO-mode path used by
-      // "Upload test video", which already recognizes not.mp4 correctly.
-      final analyzed = await _videoLandmarkService.analyzeVideo(
-        clip.path,
-        rotateClockwise90: true,
-      );
-      final result = await _aiService.recognizeFromBuffer(analyzed.frames);
-
-      if (!mounted) return;
-
-      if (result != null) {
-        setState(() {
-          _currentSign = result.sign;
-          _currentConfidence = result.confidence;
-          _sentence = result.sign;
-          _detectionStatus = 'detected';
-        });
-        _sessionSigns
-          ..clear()
-          ..add(result);
-      } else {
-        setState(() {
-          _currentSign = '';
-          _currentConfidence = 0;
-          _sentence = '';
-          _detectionStatus = 'idle';
-        });
-      }
-    } on CameraException catch (e) {
-      debugPrint('Video capture stop failed: ${e.code}: ${e.description}');
-      if (mounted) {
-        setState(() {
-          _currentSign = '';
-          _currentConfidence = 0;
-          _detectionStatus = 'idle';
-        });
-      }
-    } on PlatformException catch (e) {
-      debugPrint('Recorded-video analysis failed: ${e.code}: ${e.message}');
-      if (mounted) {
-        setState(() {
-          _currentSign = '';
-          _currentConfidence = 0;
-          _detectionStatus = 'idle';
-        });
-      }
-    } catch (e) {
-      debugPrint('Recorded-video analysis failed: $e');
-      if (mounted) {
-        setState(() {
-          _currentSign = '';
-          _currentConfidence = 0;
-          _detectionStatus = 'idle';
-        });
-      }
-    } finally {
-      await _recoverAfterRecordedCapture();
-      if (mounted) {
-        setState(() {
-          _isDetecting = false;
-          _isRecordingClip = false;
-          _isAnalyzingRecordedClip = false;
-        });
-      }
-    }
-  }
-
-  Future<void> _recoverAfterRecordedCapture() async {
-    final controller = _cameraController;
-    if (controller == null || !controller.value.isInitialized) return;
-
-    if (!controller.value.isStreamingImages &&
-        !controller.value.isRecordingVideo) {
-      try {
-        await _startCameraStream(controller);
-      } catch (e) {
-        debugPrint('Could not restart landmark preview stream: $e');
-      }
-    }
-  }
-
-  // ──────────────────────────────────────────────────────────
-  // Button handlers
-  // ──────────────────────────────────────────────────────────
-
-  Future<void> _handleStart() async {
-    await _recordClipAndAnalyze();
-  }
-
-  Future<void> _handleStop() async {
-    _captureTimer?.cancel();
-    _captureTimer = null;
-
-    final controller = _cameraController;
-    if (controller != null &&
-        controller.value.isInitialized &&
-        controller.value.isRecordingVideo) {
-      try {
-        await controller.stopVideoRecording();
-      } catch (_) {}
-    }
-
-    await _recoverAfterRecordedCapture();
-
-    if (!mounted) return;
+  void _handleStop() {
+    _cancelCycleTimers();
+    _cycleGeneration++;
+    _frameBuffer.clear();
     setState(() {
       _isDetecting = false;
-      _isRecordingClip = false;
-      _isAnalyzingRecordedClip = false;
-      _detectionStatus = 'idle';
+      _phase = SignPhase.idle;
+      _showRetryMessage = false;
     });
   }
 
@@ -466,7 +410,7 @@ class _GestureTranslationScreenState
   }
 
   Future<void> _handleFlipCamera() async {
-    if (!_cameraReady || _isDetecting || _isAnalyzingRecordedClip) return;
+    if (!_cameraReady || _isDetecting) return;
     final next = _lensDirection == CameraLensDirection.front
         ? CameraLensDirection.back
         : CameraLensDirection.front;
@@ -653,18 +597,20 @@ class _GestureTranslationScreenState
                               children: [
                                 // Detection status pill
                                 _DetectionStatusPill(
-                                  status: _detectionStatus,
+                                  status: _phase == SignPhase.idle && _currentSign.isNotEmpty
+                                      ? 'detected'
+                                      : _phase.name,
                                   currentSign: _currentSign,
                                   confidence: _currentConfidence,
                                   darkMode: darkMode,
-                                  statusText: _isAnalyzingRecordedClip
-                                      ? 'Sinusuri ang na-record na video...'
+                                  statusText: _showRetryMessage
+                                      ? 'Hindi malinaw ang senyas, subukan ulit'
                                       : null,
                                 ),
                                 const SizedBox(height: 8),
 
                                 // ── Thumbs up / down feedback ──
-                                if (_detectionStatus == 'detected' && _currentSign.isNotEmpty)
+                                if (_currentSign.isNotEmpty)
                                   _FeedbackRow(
                                     feedbackValue: _feedbackValue,
                                     feedbackSubmitted: _feedbackSubmitted,
@@ -689,9 +635,12 @@ class _GestureTranslationScreenState
                                   children: [
                                     Expanded(
                                       child: _ActionButton(
-                                        label: 'I-record',
+                                        label: 'Simulan',
                                         icon: Icons.play_arrow,
-                                        enabled: !_isDetecting && _cameraReady,
+                                        enabled:
+                                            !_isDetecting &&
+                                            _cameraReady &&
+                                            !_isAnalyzingVideo,
                                         color: ESenyasColors.accentGreen,
                                         disabledDark: darkMode,
                                         onTap: _handleStart,
@@ -883,35 +832,28 @@ class _GestureTranslationScreenState
                 ),
               ),
             ),
-            // REC badge — reuses the "scanning/recording" visual from the old mock
-            if (_isRecordingClip)
-              Positioned(
-                top: 36,
-                left: 12,
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                  decoration: BoxDecoration(
-                    color: ESenyasColors.destructiveRed,
-                    borderRadius: BorderRadius.circular(4),
-                  ),
-                  child: const Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(Icons.circle, size: 8, color: Colors.white),
-                      SizedBox(width: 4),
-                      Text(
-                        'REC',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 11,
-                          fontWeight: FontWeight.bold,
-                          letterSpacing: 1,
-                        ),
-                      ),
-                    ],
-                  ),
+            Positioned(
+              bottom: 12,
+              left: 0,
+              right: 0,
+              child: IgnorePointer(
+                child: AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 200),
+                  child: switch (_phase) {
+                    SignPhase.signing => SignGestureAnimation(
+                      key: const ValueKey(SignPhase.signing),
+                      darkMode: darkMode,
+                      duration: _signDuration,
+                    ),
+                    SignPhase.analyzing => AnalyzingAnimation(
+                      key: const ValueKey(SignPhase.analyzing),
+                      darkMode: darkMode,
+                    ),
+                    SignPhase.idle => const SizedBox.shrink(),
+                  },
                 ),
               ),
+            ),
             // Camera flip button
             Positioned(
               top: 8,
@@ -932,7 +874,7 @@ class _GestureTranslationScreenState
                 ),
               ),
             ),
-            // Frame size indicator (top-left, below REC)
+            // Frame size indicator
             Positioned(
               bottom: 28,
               left: 12,
@@ -1213,9 +1155,13 @@ class _DetectionStatusPill extends StatelessWidget {
           dotColor = ESenyasColors.accentGreen;
           text = 'Natukoy: "$currentSign" — $confidence%';
           break;
-        case 'scanning':
+        case 'signing':
           dotColor = const Color(0xFFFACC15); // yellow-400
           text = 'Gawin ang senyas ngayon...';
+          break;
+        case 'analyzing':
+          dotColor = ESenyasColors.primaryBlue;
+          text = 'Sinusuri...';
           break;
         default:
           dotColor = ESenyasColors.gray300;
@@ -1227,14 +1173,16 @@ class _DetectionStatusPill extends StatelessWidget {
       children: [
         _StatusDot(
           color: dotColor,
-          pulsing: status == 'scanning' || status == 'countdown',
+          pulsing: status == 'signing' || status == 'analyzing',
         ),
         const SizedBox(width: 8),
-        Text(
-          text,
-          style: TextStyle(
-            fontSize: 13,
-            color: darkMode ? const Color(0xFFD1D5DB) : ESenyasColors.gray600,
+        Flexible(
+          child: Text(
+            text,
+            style: TextStyle(
+              fontSize: 13,
+              color: darkMode ? const Color(0xFFD1D5DB) : ESenyasColors.gray600,
+            ),
           ),
         ),
       ],

@@ -1,13 +1,9 @@
+import 'dart:math' as math;
+import 'dart:ui' show Size;
+
 import 'package:hand_landmarker/hand_landmarker.dart';
 
 /// Coordinate transforms for live-camera MediaPipe landmarks.
-///
-/// The app UI stays portrait, but the trained model was validated with
-/// landscape 16:9 video. On the test phone, recognition works when the device
-/// is physically rotated landscape-left (top edge toward the user's left).
-/// Therefore live portrait landmarks are rotated 90° clockwise for MODEL INPUT
-/// only, reproducing that successful landscape-left coordinate space.
-///
 /// Uploaded VIDEO-mode clips must not use this transform.
 class LiveLandmarkTransform {
   static (double, double) rotateXY(
@@ -31,18 +27,49 @@ class LiveLandmarkTransform {
     }
   }
 
-  static List<List<List<double>>> toTrainingLandscapeRawHands(
-    List<Hand> hands,
-  ) {
-    return hands.map((hand) {
-      return hand.landmarks.map((landmark) {
-        // Portrait device -> equivalent of physically rotating the phone
-        // landscape-left: image/model coordinates rotate clockwise 90°.
-        final (x, y) = rotateXY(landmark.x, landmark.y, 90);
-        return <double>[x, y, landmark.z];
-      }).toList();
-    }).toList();
+  /// Raw sensor-space landmarks -> the space the model was trained in:
+  /// upright, NOT mirrored, landscape-equivalent normalization.
+  /// NOTE: outputs are only meaningful as wrist-relative offsets and for wrist-x
+  /// ordering. They are not valid absolute image positions.
+  /// [rawFrameSize] = size of the CameraImage as delivered
+  /// (Size(image.width, image.height)).
+  static List<List<List<double>>> toTrainingSpaceRaw(
+    List<List<List<double>>> hands, {
+    required int sensorOrientation,
+    required Size rawFrameSize,
+  }) {
+    final rot = ((sensorOrientation % 360) + 360) % 360;
+    final swapped = rot == 90 || rot == 270;
+    final upW = swapped ? rawFrameSize.height : rawFrameSize.width;
+    final upH = swapped ? rawFrameSize.width : rawFrameSize.height;
+    final xScale = upW / math.max(upW, upH);
+    final yScale = upH / math.min(upW, upH);
+    final out = <List<List<double>>>[];
+    for (final hand in hands) {
+      final pts = <List<double>>[];
+      for (final p in hand) {
+        final (ux, uy) = rotateXY(p[0], p[1], rot);
+        pts.add([ux * xScale, uy * yScale, p[2]]);
+      }
+      out.add(pts);
+    }
+    return out;
   }
+
+  static List<List<List<double>>> toTrainingSpace(
+    List<Hand> hands, {
+    required int sensorOrientation,
+    required Size rawFrameSize,
+  }) => toTrainingSpaceRaw(
+    [
+      for (final h in hands)
+        [
+          for (final l in h.landmarks) [l.x, l.y, l.z],
+        ],
+    ],
+    sensorOrientation: sensorOrientation,
+    rawFrameSize: rawFrameSize,
+  );
 
   static List<List<List<double>>> toUprightRawHands(
     List<Hand> hands,
