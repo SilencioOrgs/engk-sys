@@ -38,12 +38,12 @@ class MainActivity : FlutterActivity() {
                 result.error("INVALID_PATH", "Video path is empty.", null)
                 return@setMethodCallHandler
             }
-            val rotateClockwise90 =
-                call.argument<Boolean>("rotateClockwise90") ?: false
+            val rotationDegrees =
+                call.argument<Int>("rotationDegrees") ?: 0
 
             Thread {
                 try {
-                    val payload = analyzeVideo(path, rotateClockwise90)
+                    val payload = analyzeVideo(path, rotationDegrees)
                     runOnUiThread { result.success(payload) }
                 } catch (t: Throwable) {
                     runOnUiThread {
@@ -60,7 +60,7 @@ class MainActivity : FlutterActivity() {
 
     private fun analyzeVideo(
         path: String,
-        rotateClockwise90: Boolean
+        rotationDegrees: Int
     ): Map<String, Any> {
         val retriever = MediaMetadataRetriever()
 
@@ -118,10 +118,11 @@ class MainActivity : FlutterActivity() {
             ) ?: throw IllegalArgumentException(
                 "Could not decode the first video frame."
             )
+            val swapsDimensions = Math.abs(rotationDegrees) % 180 != 0
             val width =
-                if (rotateClockwise90) firstFrame.height else firstFrame.width
+                if (swapsDimensions) firstFrame.height else firstFrame.width
             val height =
-                if (rotateClockwise90) firstFrame.width else firstFrame.height
+                if (swapsDimensions) firstFrame.width else firstFrame.height
             firstFrame.recycle()
 
             val frames =
@@ -148,8 +149,10 @@ class MainActivity : FlutterActivity() {
                     else bitmap.copy(Bitmap.Config.ARGB_8888, false)
 
                 val analysisFrame =
-                    if (rotateClockwise90) {
-                        val matrix = Matrix().apply { postRotate(90f) }
+                    if (rotationDegrees % 360 != 0) {
+                        val matrix = Matrix().apply {
+                            postRotate(rotationDegrees.toFloat())
+                        }
                         Bitmap.createBitmap(
                             argbFrame,
                             0,
