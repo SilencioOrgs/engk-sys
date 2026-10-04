@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:hand_landmarker/hand_landmarker.dart';
 
+import '../utils/live_landmark_transform.dart';
+
 /// Paints the exact MediaPipe landmarks received by the app.
 ///
 /// MediaPipe x/y landmarks are normalized to 0..1. [mirrorX] is display-only
@@ -8,11 +10,13 @@ import 'package:hand_landmarker/hand_landmarker.dart';
 class HandLandmarkOverlay extends StatelessWidget {
   final List<Hand> hands;
   final bool mirrorX;
+  final int rotationDegrees;
 
   const HandLandmarkOverlay({
     super.key,
     required this.hands,
     required this.mirrorX,
+    required this.rotationDegrees,
   });
 
   @override
@@ -22,6 +26,7 @@ class HandLandmarkOverlay extends StatelessWidget {
         painter: _HandLandmarkPainter(
           hands: hands,
           mirrorX: mirrorX,
+          rotationDegrees: rotationDegrees,
         ),
         size: Size.infinite,
       ),
@@ -41,10 +46,12 @@ class _HandLandmarkPainter extends CustomPainter {
 
   final List<Hand> hands;
   final bool mirrorX;
+  final int rotationDegrees;
 
   _HandLandmarkPainter({
     required this.hands,
     required this.mirrorX,
+    required this.rotationDegrees,
   });
 
   @override
@@ -52,8 +59,13 @@ class _HandLandmarkPainter extends CustomPainter {
     if (hands.isEmpty || size.isEmpty) return;
 
     Offset mapPoint(Landmark landmark) {
-      final x = (mirrorX ? 1.0 - landmark.x : landmark.x).clamp(0.0, 1.0);
-      final y = landmark.y.clamp(0.0, 1.0);
+      final (uprightX, uprightY) = LiveLandmarkTransform.rotateXY(
+        landmark.x,
+        landmark.y,
+        rotationDegrees,
+      );
+      final x = (mirrorX ? 1.0 - uprightX : uprightX).clamp(0.0, 1.0);
+      final y = uprightY.clamp(0.0, 1.0);
       return Offset(x * size.width, y * size.height);
     }
 
@@ -118,6 +130,8 @@ class _HandLandmarkPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant _HandLandmarkPainter oldDelegate) {
-    return oldDelegate.hands != hands || oldDelegate.mirrorX != mirrorX;
+    return oldDelegate.hands != hands ||
+        oldDelegate.mirrorX != mirrorX ||
+        oldDelegate.rotationDegrees != rotationDegrees;
   }
 }
