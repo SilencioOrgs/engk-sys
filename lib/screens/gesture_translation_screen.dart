@@ -779,8 +779,9 @@ class _GestureTranslationScreenState
                 builder: (context, hands, _) {
                   return HandLandmarkOverlay(
                     hands: hands,
-                    mirrorX: _lensDirection == CameraLensDirection.front,
-                    rotationDegrees: _sensorOrientation,
+                    previewSize: _cameraController!.value.previewSize!,
+                    lensDirection: _lensDirection,
+                    sensorOrientation: _sensorOrientation,
                   );
                 },
               ),
