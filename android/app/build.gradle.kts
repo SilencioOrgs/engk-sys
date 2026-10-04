@@ -40,6 +40,12 @@ kotlin {
     }
 }
 
+dependencies {
+    // Offline uploaded-video testing uses MediaPipe Hand Landmarker VIDEO mode.
+    // Keep aligned with hand_landmarker 3.0.1.
+    implementation("com.google.mediapipe:tasks-vision:1.0.0")
+}
+
 flutter {
     source = "../.."
 }
