@@ -770,7 +770,13 @@ class _GestureTranslationScreenState
                     child: SizedBox(
                       width: _cameraController!.value.previewSize!.height,
                       height: _cameraController!.value.previewSize!.width,
-                      child: CameraPreview(_cameraController!),
+                      child: _lensDirection == CameraLensDirection.front
+                          ? Transform(
+                              alignment: Alignment.center,
+                              transform: Matrix4.diagonal3Values(-1, 1, 1),
+                              child: CameraPreview(_cameraController!),
+                            )
+                          : CameraPreview(_cameraController!),
                     ),
                   ),
                 ),
@@ -780,12 +786,19 @@ class _GestureTranslationScreenState
               child: ValueListenableBuilder<List<Hand>>(
                 valueListenable: _latestHands,
                 builder: (context, hands, _) {
-                  return HandLandmarkOverlay(
+                  final overlay = HandLandmarkOverlay(
                     hands: hands,
                     previewSize: _cameraController!.value.previewSize!,
                     lensDirection: _lensDirection,
                     sensorOrientation: _sensorOrientation,
                   );
+                  return _lensDirection == CameraLensDirection.front
+                      ? Transform(
+                          alignment: Alignment.center,
+                          transform: Matrix4.diagonal3Values(-1, 1, 1),
+                          child: overlay,
+                        )
+                      : overlay;
                 },
               ),
             ),
