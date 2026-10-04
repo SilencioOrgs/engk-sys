@@ -51,7 +51,6 @@ class _GestureTranslationScreenState
   StreamSubscription<List<Hand>>? _landmarkSub;
   final ValueNotifier<List<Hand>> _latestHands =
       ValueNotifier<List<Hand>>(const []);
-  int _latestHandCount = 0;
 
   // ── Capture-loop state ──
   bool _isDetecting = false;
@@ -158,7 +157,6 @@ class _GestureTranslationScreenState
   // ──────────────────────────────────────────────────────────
 
   void _onLandmarks(List<Hand> hands) {
-    _latestHandCount = hands.length;
     _latestHands.value = List<Hand>.unmodifiable(hands);
 
     if (!_isDetecting || _isCountingDown) return;
