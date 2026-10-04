@@ -1088,8 +1088,10 @@ class _TestingModeScreenState extends State<TestingModeScreen> {
               builder: (context, hands, _) {
                 return HandLandmarkOverlay(
                   hands: hands,
-                  mirrorX: _activeLensDirection == CameraLensDirection.front,
-                  rotationDegrees: _sensorOrientation,
+                  previewSize: previewSize,
+                  lensDirection:
+                      _activeLensDirection ?? CameraLensDirection.front,
+                  sensorOrientation: _sensorOrientation,
                 );
               },
             ),
