@@ -120,7 +120,7 @@ class MainActivity : FlutterActivity() {
                 ArrayList<List<List<List<Double>>>>(estimatedFrameCount + 1)
             var activeFrames = 0
 
-            for (frameIndex in 0..estimatedFrameCount) {
+            for (frameIndex in 0 until estimatedFrameCount) {
                 val timestampMs =
                     (frameIndex * 1000.0 / sourceFps).roundToLong()
                 if (timestampMs > durationMs) break
