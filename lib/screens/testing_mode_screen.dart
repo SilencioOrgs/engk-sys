@@ -1,6 +1,7 @@
-﻿import 'dart:async';
+import 'dart:async';
 import 'dart:math';
 import 'package:camera/camera.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:hand_landmarker/hand_landmarker.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -55,6 +56,12 @@ class _TestingModeScreenState extends State<TestingModeScreen> {
   bool _saved = false;
   String _captureStatus = 'idle'; // idle | capturing | done
 
+  // ── Golden self-test & Debug metrics ──
+  bool _isRunningGoldenTest = false;
+  GoldenResult? _goldenResult;
+  int _latestHandCount = 0;
+  Timer? _debugTimer;
+
   // ──────────────────────────────────────────────────────────
   // Lifecycle
   // ──────────────────────────────────────────────────────────
@@ -63,10 +70,16 @@ class _TestingModeScreenState extends State<TestingModeScreen> {
   void initState() {
     super.initState();
     _initCameraAndService();
+    if (kDebugMode) {
+      _debugTimer = Timer.periodic(const Duration(milliseconds: 250), (_) {
+        if (mounted) setState(() {});
+      });
+    }
   }
 
   @override
   void dispose() {
+    _debugTimer?.cancel();
     _captureTimer?.cancel();
     _landmarkSub?.cancel();
     _cameraController?.stopImageStream();
@@ -102,6 +115,7 @@ class _TestingModeScreenState extends State<TestingModeScreen> {
       front,
       ResolutionPreset.medium,
       enableAudio: false,
+      imageFormatGroup: ImageFormatGroup.yuv420,
     );
     await controller.initialize();
     await controller.startImageStream((CameraImage image) {
@@ -124,6 +138,7 @@ class _TestingModeScreenState extends State<TestingModeScreen> {
   // ──────────────────────────────────────────────────────────
 
   void _onLandmarks(List<Hand> hands) {
+    _latestHandCount = hands.length;
     if (!_isCapturing) return;
     if (hands.isEmpty) {
       _frameBuffer.add(const FrameLandmarks.noHand());
@@ -188,6 +203,35 @@ class _TestingModeScreenState extends State<TestingModeScreen> {
     Future.delayed(const Duration(seconds: 2), () {
       if (mounted) setState(() => _saved = false);
     });
+  }
+
+  Future<void> _handleRunGoldenSelfTest() async {
+    if (_isRunningGoldenTest) return;
+    setState(() => _isRunningGoldenTest = true);
+    try {
+      final result = await _aiService.runGoldenSelfTest();
+      if (mounted) {
+        setState(() {
+          _goldenResult = result;
+          _isRunningGoldenTest = false;
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _goldenResult = GoldenResult(
+            passed: false,
+            seqDiff: 1.0,
+            probDiff: 1.0,
+            topLabel: 'ERROR',
+            expectedTop: 'UNKNOWN',
+            topMatches: false,
+            error: e.toString(),
+          );
+          _isRunningGoldenTest = false;
+        });
+      }
+    }
   }
 
   int get _accuracy =>
@@ -508,6 +552,196 @@ class _TestingModeScreenState extends State<TestingModeScreen> {
                                 ),
                               ],
                             ),
+                            const SizedBox(height: 12),
+
+                            // ── Run golden self-test button ──
+                            SizedBox(
+                              width: double.infinity,
+                              height: ESenyasDimens.buttonHeight,
+                              child: ElevatedButton.icon(
+                                onPressed: _isRunningGoldenTest
+                                    ? null
+                                    : _handleRunGoldenSelfTest,
+                                icon: _isRunningGoldenTest
+                                    ? const SizedBox(
+                                        width: 18,
+                                        height: 18,
+                                        child: CircularProgressIndicator(
+                                          strokeWidth: 2,
+                                          color: Colors.white,
+                                        ),
+                                      )
+                                    : const Icon(Icons.verified, size: 18),
+                                label: Text(_isRunningGoldenTest
+                                    ? 'Running self-test...'
+                                    : 'Run golden self-test'),
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: ESenyasColors.primaryBlue,
+                                  foregroundColor: Colors.white,
+                                  disabledBackgroundColor:
+                                      ESenyasColors.gray300,
+                                  elevation: 1,
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(
+                                        ESenyasDimens.borderRadiusMd),
+                                  ),
+                                  textStyle: const TextStyle(
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w500,
+                                  ),
+                                ),
+                              ),
+                            ),
+
+                            // ── Golden self-test result ──
+                            if (_goldenResult != null) ...[
+                              const SizedBox(height: 8),
+                              Container(
+                                width: double.infinity,
+                                padding: const EdgeInsets.all(12),
+                                decoration: BoxDecoration(
+                                  color: _goldenResult!.passed
+                                      ? const Color(0xFFF0FDF4)
+                                      : const Color(0xFFFEF2F2),
+                                  borderRadius: BorderRadius.circular(
+                                      ESenyasDimens.borderRadiusMd),
+                                  border: Border.all(
+                                    color: _goldenResult!.passed
+                                        ? ESenyasColors.accentGreen
+                                        : const Color(0xFFF87171),
+                                    width: 1.5,
+                                  ),
+                                ),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Row(
+                                      mainAxisAlignment:
+                                          MainAxisAlignment.spaceBetween,
+                                      children: [
+                                        Text(
+                                          _goldenResult!.passed
+                                              ? 'PASS (Golden Self-Test)'
+                                              : 'FAIL (Golden Self-Test)',
+                                          style: TextStyle(
+                                            fontSize: 13,
+                                            fontWeight: FontWeight.bold,
+                                            color: _goldenResult!.passed
+                                                ? ESenyasColors.accentGreen
+                                                : const Color(0xFFDC2626),
+                                          ),
+                                        ),
+                                        Icon(
+                                          _goldenResult!.passed
+                                              ? Icons.check_circle
+                                              : Icons.cancel,
+                                          size: 18,
+                                          color: _goldenResult!.passed
+                                              ? ESenyasColors.accentGreen
+                                              : const Color(0xFFDC2626),
+                                        ),
+                                      ],
+                                    ),
+                                    const SizedBox(height: 6),
+                                    Text(
+                                      'seqDiff: ${_goldenResult!.seqDiff.toStringAsExponential(3)} (expected < 1e-4)\n'
+                                      'probDiff: ${_goldenResult!.probDiff.toStringAsExponential(3)} (expected < 1e-3)\n'
+                                      'Top label: "${_goldenResult!.topLabel}"',
+                                      style: TextStyle(
+                                        fontSize: 11,
+                                        height: 1.4,
+                                        fontFamily: 'monospace',
+                                        color: _goldenResult!.passed
+                                            ? const Color(0xFF166534)
+                                            : const Color(0xFF991B1B),
+                                      ),
+                                    ),
+                                    if (_goldenResult!.error != null) ...[
+                                      const SizedBox(height: 4),
+                                      Text(
+                                        'Error: ${_goldenResult!.error}',
+                                        style: const TextStyle(
+                                          fontSize: 11,
+                                          color: Color(0xFF991B1B),
+                                        ),
+                                      ),
+                                    ],
+                                  ],
+                                ),
+                              ),
+                            ],
+
+                            // ── Debug overlay (kDebugMode only) ──
+                            if (kDebugMode) ...[
+                              const SizedBox(height: 12),
+                              Container(
+                                width: double.infinity,
+                                padding: const EdgeInsets.all(12),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFF1E293B),
+                                  borderRadius: BorderRadius.circular(
+                                      ESenyasDimens.borderRadiusMd),
+                                  border: Border.all(
+                                      color: const Color(0xFF334155)),
+                                ),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    const Row(
+                                      children: [
+                                        Icon(Icons.bug_report,
+                                            size: 14,
+                                            color: Color(0xFF38BDF8)),
+                                        SizedBox(width: 6),
+                                        Text(
+                                          'Debug Overlay (kDebugMode)',
+                                          style: TextStyle(
+                                            color: Color(0xFF38BDF8),
+                                            fontSize: 12,
+                                            fontWeight: FontWeight.bold,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                    const SizedBox(height: 8),
+                                    Text(
+                                      'Hands in latest frame: $_latestHandCount\n'
+                                      'Frames buffered: ${_frameBuffer.length}\n'
+                                      'lastActiveFrames: ${_aiService.lastActiveFrames}\n'
+                                      'mirrorInputX: ${TFLiteAIService.mirrorInputX}\n'
+                                      'lastTop3:',
+                                      style: const TextStyle(
+                                        color: Color(0xFFE2E8F0),
+                                        fontSize: 11,
+                                        fontFamily: 'monospace',
+                                        height: 1.4,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 4),
+                                    if (_aiService.lastTop3.isEmpty)
+                                      const Text(
+                                        '  (none yet)',
+                                        style: TextStyle(
+                                          color: Color(0xFF94A3B8),
+                                          fontSize: 11,
+                                          fontFamily: 'monospace',
+                                        ),
+                                      )
+                                    else
+                                      ..._aiService.lastTop3.map(
+                                        (entry) => Text(
+                                          '  • ${entry.key}: ${(entry.value * 100).toStringAsFixed(1)}% (${entry.value.toStringAsFixed(4)})',
+                                          style: const TextStyle(
+                                            color: Color(0xFFFDE047),
+                                            fontSize: 11,
+                                            fontFamily: 'monospace',
+                                          ),
+                                        ),
+                                      ),
+                                  ],
+                                ),
+                              ),
+                            ],
                             const SizedBox(height: 16),
                           ],
                         ),

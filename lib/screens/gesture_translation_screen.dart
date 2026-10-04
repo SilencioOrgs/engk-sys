@@ -52,11 +52,14 @@ class _GestureTranslationScreenState
   // ── Capture-loop state ──
   bool _isDetecting = false;
   Timer? _captureTimer;
+  Timer? _countdownTimer;
+  int _countdown = 0;
+  bool _isCountingDown = false;
 
   // ── Detection display ──
   String _currentSign = '';
   int _currentConfidence = 0;
-  /// idle | scanning | detected
+  /// idle | scanning | detected | countdown
   String _detectionStatus = 'idle';
 
   // ── Sentence / session ──
@@ -81,6 +84,7 @@ class _GestureTranslationScreenState
 
   @override
   void dispose() {
+    _countdownTimer?.cancel();
     _captureTimer?.cancel();
     _landmarkSub?.cancel();
     _cameraController?.stopImageStream();
@@ -123,6 +127,7 @@ class _GestureTranslationScreenState
       desc,
       ResolutionPreset.medium,
       enableAudio: false,
+      imageFormatGroup: ImageFormatGroup.yuv420,
     );
     await controller.initialize();
 
@@ -148,7 +153,7 @@ class _GestureTranslationScreenState
   // ──────────────────────────────────────────────────────────
 
   void _onLandmarks(List<Hand> hands) {
-    if (!_isDetecting) return;
+    if (!_isDetecting || _isCountingDown) return;
 
     if (hands.isEmpty) {
       _frameBuffer.add(const FrameLandmarks.noHand());
@@ -169,8 +174,36 @@ class _GestureTranslationScreenState
   // Capture loop
   // ──────────────────────────────────────────────────────────
 
+  void _startCountdownCycle() {
+    _countdownTimer?.cancel();
+    _captureTimer?.cancel();
+    if (!mounted || !_isDetecting) return;
+
+    _countdown = 3;
+    _isCountingDown = true;
+    setState(() {
+      _detectionStatus = 'countdown';
+    });
+
+    _countdownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (!mounted || !_isDetecting) {
+        timer.cancel();
+        return;
+      }
+      _countdown--;
+      if (_countdown <= 0) {
+        timer.cancel();
+        _isCountingDown = false;
+        _startCaptureCycle();
+      } else {
+        setState(() {});
+      }
+    });
+  }
+
   void _startCaptureCycle() {
     _frameBuffer.clear();
+    _isCountingDown = false;
     if (mounted) setState(() => _detectionStatus = 'scanning');
     _captureTimer = Timer(const Duration(seconds: 4), _onCaptureComplete);
   }
@@ -203,8 +236,8 @@ class _GestureTranslationScreenState
       });
     }
 
-    // Immediately start the next 4-second cycle.
-    if (_isDetecting && mounted) _startCaptureCycle();
+    // Start 3-2-1 countdown before the next 4-second capture cycle.
+    if (_isDetecting && mounted) _startCountdownCycle();
   }
 
   // ──────────────────────────────────────────────────────────
@@ -221,13 +254,15 @@ class _GestureTranslationScreenState
       _feedbackSubmitted = false;
     });
     _sessionSigns.clear();
-    _startCaptureCycle();
+    _startCountdownCycle();
   }
 
   void _handleStop() {
+    _countdownTimer?.cancel();
     _captureTimer?.cancel();
     setState(() {
       _isDetecting = false;
+      _isCountingDown = false;
       _detectionStatus = 'idle';
     });
   }
@@ -318,6 +353,9 @@ class _GestureTranslationScreenState
                                   currentSign: _currentSign,
                                   confidence: _currentConfidence,
                                   darkMode: darkMode,
+                                  statusText: _isCountingDown
+                                      ? 'Maghanda... $_countdown'
+                                      : null,
                                 ),
                                 const SizedBox(height: 8),
 
@@ -811,12 +849,14 @@ class _DetectionStatusPill extends StatelessWidget {
   final String currentSign;
   final int confidence;
   final bool darkMode;
+  final String? statusText;
 
   const _DetectionStatusPill({
     required this.status,
     required this.currentSign,
     required this.confidence,
     required this.darkMode,
+    this.statusText,
   });
 
   @override
@@ -824,23 +864,31 @@ class _DetectionStatusPill extends StatelessWidget {
     final Color dotColor;
     final String text;
 
-    switch (status) {
-      case 'detected':
-        dotColor = ESenyasColors.accentGreen;
-        text = 'Natukoy: "$currentSign" — $confidence%';
-        break;
-      case 'scanning':
-        dotColor = const Color(0xFFFACC15); // yellow-400
-        text = 'Naghahanap ng Kamay...';
-        break;
-      default:
-        dotColor = ESenyasColors.gray300;
-        text = 'Walang Natukoy na Kamay';
+    if (statusText != null && statusText!.isNotEmpty) {
+      dotColor = const Color(0xFF38BDF8); // sky-400
+      text = statusText!;
+    } else {
+      switch (status) {
+        case 'detected':
+          dotColor = ESenyasColors.accentGreen;
+          text = 'Natukoy: "$currentSign" — $confidence%';
+          break;
+        case 'scanning':
+          dotColor = const Color(0xFFFACC15); // yellow-400
+          text = 'Naghahanap ng Kamay...';
+          break;
+        default:
+          dotColor = ESenyasColors.gray300;
+          text = 'Walang Natukoy na Kamay';
+      }
     }
 
     return Row(
       children: [
-        _StatusDot(color: dotColor, pulsing: status == 'scanning'),
+        _StatusDot(
+          color: dotColor,
+          pulsing: status == 'scanning' || status == 'countdown',
+        ),
         const SizedBox(width: 8),
         Text(
           text,

@@ -31,3 +31,4 @@ flutter:
     - assets/icons/
     - assets/videos/
     - assets/models/
+    - assets/test/
