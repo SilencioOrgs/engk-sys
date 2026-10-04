@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:hand_landmarker/hand_landmarker.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:provider/provider.dart';
@@ -8,6 +10,7 @@ import '../models/detected_sign.dart';
 import '../models/frame_landmarks.dart';
 import '../providers/app_provider.dart';
 import '../services/tflite_ai_service.dart';
+import '../services/video_landmark_service.dart';
 import '../utils/constants.dart';
 import '../widgets/bottom_nav_bar.dart';
 import '../widgets/esenyas_app_bar.dart';
@@ -34,6 +37,7 @@ class _GestureTranslationScreenState
     extends State<GestureTranslationScreen> {
   // ── AI service ──
   final TFLiteAIService _aiService = TFLiteAIService();
+  final VideoLandmarkService _videoLandmarkService = VideoLandmarkService();
 
   // ── Camera ──
   CameraController? _cameraController;
@@ -69,6 +73,15 @@ class _GestureTranslationScreenState
   String _sentence = '';
   final List<DetectedSign> _sessionSigns = [];
   bool _savedToast = false;
+
+  // ── Uploaded-video test state ──
+  bool _isAnalyzingVideo = false;
+  String? _uploadedVideoName;
+  String? _uploadedVideoPrediction;
+  int _uploadedVideoConfidence = 0;
+  List<MapEntry<String, double>> _uploadedVideoTop3 = const [];
+  VideoLandmarkResult? _uploadedVideoResult;
+  String? _uploadedVideoError;
 
   // ── Feedback (thumbs up / down) ──
   /// null = no feedback given yet, true = thumbs up, false = thumbs down
@@ -136,12 +149,7 @@ class _GestureTranslationScreenState
     await controller.initialize();
 
     // Feed every camera frame to the hand landmarker (fire-and-forget).
-    await controller.startImageStream((CameraImage image) {
-      _aiService.handPlugin.processFrame(
-        image,
-        controller.description.sensorOrientation,
-      );
-    });
+    await _startCameraStream(controller);
 
     if (mounted) {
       setState(() {
@@ -150,6 +158,16 @@ class _GestureTranslationScreenState
         _lensDirection = direction;
       });
     }
+  }
+
+  Future<void> _startCameraStream(CameraController controller) async {
+    if (controller.value.isStreamingImages) return;
+    await controller.startImageStream((CameraImage image) {
+      _aiService.handPlugin.processFrame(
+        image,
+        controller.description.sensorOrientation,
+      );
+    });
   }
 
   // ──────────────────────────────────────────────────────────
@@ -296,6 +314,81 @@ class _GestureTranslationScreenState
     });
   }
 
+  Future<void> _handleUploadVideo() async {
+    if (_isAnalyzingVideo || _isDetecting) return;
+
+    final file = await FilePicker.pickFile(type: FileType.video);
+    if (file == null) return;
+
+    final path = file.path;
+    if (path == null || path.isEmpty) {
+      setState(() {
+        _uploadedVideoName = file.name;
+        _uploadedVideoError =
+            'Hindi ma-access ang local path ng napiling video.';
+      });
+      return;
+    }
+
+    setState(() {
+      _isAnalyzingVideo = true;
+      _uploadedVideoName = file.name;
+      _uploadedVideoPrediction = null;
+      _uploadedVideoConfidence = 0;
+      _uploadedVideoTop3 = const [];
+      _uploadedVideoResult = null;
+      _uploadedVideoError = null;
+    });
+
+    final controller = _cameraController;
+    final restartCamera =
+        controller != null && controller.value.isStreamingImages;
+
+    try {
+      if (restartCamera && controller != null) {
+        await controller.stopImageStream();
+      }
+
+      final analyzed = await _videoLandmarkService.analyzeVideo(path);
+      final prediction = await _aiService.recognizeFromBuffer(analyzed.frames);
+      final top3 = List<MapEntry<String, double>>.from(_aiService.lastTop3);
+
+      if (!mounted) return;
+      setState(() {
+        _uploadedVideoResult = analyzed;
+        _uploadedVideoPrediction =
+            prediction?.sign ?? '(hindi natukoy)';
+        _uploadedVideoConfidence = prediction?.confidence ?? 0;
+        _uploadedVideoTop3 = top3;
+        _isAnalyzingVideo = false;
+      });
+    } on PlatformException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _uploadedVideoError = e.message ?? e.code;
+        _isAnalyzingVideo = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _uploadedVideoError = e.toString();
+        _isAnalyzingVideo = false;
+      });
+    } finally {
+      if (restartCamera &&
+          mounted &&
+          controller != null &&
+          controller.value.isInitialized &&
+          !controller.value.isStreamingImages) {
+        try {
+          await _startCameraStream(controller);
+        } catch (_) {
+          // Keep the uploaded-video result visible even if camera restart fails.
+        }
+      }
+    }
+  }
+
   Future<void> _handleFlipCamera() async {
     if (!_cameraReady) return;
     final next = _lensDirection == CameraLensDirection.front
@@ -347,6 +440,135 @@ class _GestureTranslationScreenState
                         children: [
                           // ── Camera preview (dynamic height) ──
                           _buildCameraSection(darkMode),
+
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+                            child: Column(
+                              children: [
+                                SizedBox(
+                                  width: double.infinity,
+                                  height: ESenyasDimens.buttonHeight,
+                                  child: OutlinedButton.icon(
+                                    onPressed:
+                                        _isAnalyzingVideo || _isDetecting
+                                            ? null
+                                            : _handleUploadVideo,
+                                    icon: _isAnalyzingVideo
+                                        ? const SizedBox(
+                                            width: 18,
+                                            height: 18,
+                                            child: CircularProgressIndicator(
+                                              strokeWidth: 2,
+                                            ),
+                                          )
+                                        : const Icon(
+                                            Icons.video_file_outlined,
+                                            size: 18,
+                                          ),
+                                    label: Text(
+                                      _isAnalyzingVideo
+                                          ? 'Sinusuri ang video...'
+                                          : 'Mag-upload ng Test Video',
+                                    ),
+                                    style: OutlinedButton.styleFrom(
+                                      foregroundColor:
+                                          ESenyasColors.primaryBlue,
+                                      side: const BorderSide(
+                                        color: ESenyasColors.primaryBlue,
+                                      ),
+                                      shape: RoundedRectangleBorder(
+                                        borderRadius: BorderRadius.circular(
+                                          ESenyasDimens.borderRadiusMd,
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                                if (_uploadedVideoName != null) ...[
+                                  const SizedBox(height: 8),
+                                  Container(
+                                    width: double.infinity,
+                                    padding: const EdgeInsets.all(12),
+                                    decoration: BoxDecoration(
+                                      color: darkMode
+                                          ? ESenyasColors.cardDark
+                                          : const Color(0xFFF8FAFC),
+                                      borderRadius: BorderRadius.circular(
+                                        ESenyasDimens.borderRadiusMd,
+                                      ),
+                                      border: Border.all(
+                                        color: darkMode
+                                            ? ESenyasColors.gray700
+                                            : const Color(0xFFCBD5E1),
+                                      ),
+                                    ),
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        Text(
+                                          _uploadedVideoName!,
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: TextStyle(
+                                            fontSize: 12,
+                                            fontWeight: FontWeight.w600,
+                                            color: darkMode
+                                                ? Colors.white
+                                                : ESenyasColors.gray800,
+                                          ),
+                                        ),
+                                        if (_uploadedVideoError != null) ...[
+                                          const SizedBox(height: 6),
+                                          Text(
+                                            'Error: $_uploadedVideoError',
+                                            style: const TextStyle(
+                                              color:
+                                                  ESenyasColors.destructiveRed,
+                                              fontSize: 11,
+                                            ),
+                                          ),
+                                        ] else if (_uploadedVideoResult !=
+                                            null) ...[
+                                          const SizedBox(height: 6),
+                                          Text(
+                                            'Prediction: ${_uploadedVideoPrediction ?? "—"}'
+                                            '${_uploadedVideoConfidence > 0 ? " · $_uploadedVideoConfidence%" : ""}\n'
+                                            'Source: ${_uploadedVideoResult!.sourceFps.toStringAsFixed(2)} fps · '
+                                            '${(_uploadedVideoResult!.durationMs / 1000).toStringAsFixed(2)} s\n'
+                                            'Frames: ${_uploadedVideoResult!.sampledFrames} · '
+                                            'Active: ${_uploadedVideoResult!.activeFrames}',
+                                            style: TextStyle(
+                                              fontSize: 11,
+                                              height: 1.45,
+                                              fontFamily: 'monospace',
+                                              color: darkMode
+                                                  ? ESenyasColors.gray300
+                                                  : ESenyasColors.gray700,
+                                            ),
+                                          ),
+                                          if (_uploadedVideoTop3.isNotEmpty)
+                                            ..._uploadedVideoTop3.map(
+                                              (entry) => Text(
+                                                '• ${entry.key}: '
+                                                '${(entry.value * 100).toStringAsFixed(1)}%',
+                                                style: TextStyle(
+                                                  fontSize: 11,
+                                                  fontFamily: 'monospace',
+                                                  color: darkMode
+                                                      ? ESenyasColors.gray300
+                                                      : ESenyasColors.gray700,
+                                                ),
+                                              ),
+                                            ),
+                                        ],
+                                      ],
+                                    ),
+                                  ),
+                                ],
+                              ],
+                            ),
+                          ),
 
                           Padding(
                             padding: const EdgeInsets.all(16),
