@@ -1,0 +1,28 @@
+{
+  "model_file": "esenyas_model.tflite",
+  "labels_file": "labels.txt",
+  "input_shape": [
+    1,
+    45,
+    126
+  ],
+  "input_dtype": "float32",
+  "output_shape": [
+    1,
+    105
+  ],
+  "output_dtype": "float32",
+  "fixed_batch_size": 1,
+  "sequence_length": 45,
+  "features_per_frame": 126,
+  "max_num_hands": 2,
+  "landmarks_per_hand": 21,
+  "coords_per_landmark": 3,
+  "hand_ordering": "sorted_by_screen_x_position_ascending",
+  "missing_hand_strategy": "zero_vector",
+  "normalization": "wrist_relative",
+  "active_window_padding": 0.08,
+  "capture_mode": "bounded_4_second_capture",
+  "num_classes": 105,
+  "label_language": "Filipino"
+}

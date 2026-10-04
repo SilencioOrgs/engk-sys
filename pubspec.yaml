@@ -1,0 +1,33 @@
+name: esenyas
+description: "e-Senyas — Filipino Sign Language to Text Translator"
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.12.2
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+  provider: ^6.1.0
+  intl: ^0.19.0
+  # ── Real model integration ──
+  tflite_flutter: ^0.12.1
+  hand_landmarker: ^3.0.1
+  camera: ^0.12.0+1          # ^0.12.0+1 required by hand_landmarker 3.0.1
+  permission_handler: ^11.3.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
+
+  assets:
+    - assets/images/
+    - assets/icons/
+    - assets/videos/
+    - assets/models/
