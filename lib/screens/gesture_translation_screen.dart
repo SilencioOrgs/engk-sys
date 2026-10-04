@@ -1,4 +1,4 @@
-﻿import 'dart:async';
+import 'dart:async';
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:hand_landmarker/hand_landmarker.dart';
@@ -40,6 +40,11 @@ class _GestureTranslationScreenState
   bool _permissionGranted = true; // optimistic until runtime check
   CameraLensDirection _lensDirection = CameraLensDirection.front;
 
+  // ── Dynamic camera frame height ──
+  static const double _cameraHeightMin = 140.0;
+  static const double _cameraHeightMax = 400.0;
+  double _cameraHeight = ESenyasDimens.cameraPreviewHeight;
+
   // ── Landmark buffer (populated from hand_landmarker stream) ──
   final List<FrameLandmarks> _frameBuffer = [];
   StreamSubscription<List<Hand>>? _landmarkSub;
@@ -58,6 +63,11 @@ class _GestureTranslationScreenState
   String _sentence = '';
   final List<DetectedSign> _sessionSigns = [];
   bool _savedToast = false;
+
+  // ── Feedback (thumbs up / down) ──
+  /// null = no feedback given yet, true = thumbs up, false = thumbs down
+  bool? _feedbackValue;
+  bool _feedbackSubmitted = false;
 
   // ──────────────────────────────────────────────────────────
   // Lifecycle
@@ -207,6 +217,8 @@ class _GestureTranslationScreenState
       _currentSign = '';
       _currentConfidence = 0;
       _isDetecting = true;
+      _feedbackValue = null;
+      _feedbackSubmitted = false;
     });
     _sessionSigns.clear();
     _startCaptureCycle();
@@ -225,6 +237,8 @@ class _GestureTranslationScreenState
       _sentence = '';
       _currentSign = '';
       _currentConfidence = 0;
+      _feedbackValue = null;
+      _feedbackSubmitted = false;
     });
     _sessionSigns.clear();
   }
@@ -256,6 +270,17 @@ class _GestureTranslationScreenState
   bool get _canSave => !_isDetecting && _sessionSigns.isNotEmpty;
   bool get _canClear => !_isDetecting && _sentence.isNotEmpty;
 
+  void _handleFeedback(bool isPositive) {
+    setState(() {
+      _feedbackValue = isPositive;
+      _feedbackSubmitted = true;
+    });
+    // Auto-dismiss the "thank you" after 2 seconds
+    Future.delayed(const Duration(seconds: 2), () {
+      if (mounted) setState(() => _feedbackSubmitted = false);
+    });
+  }
+
   // ──────────────────────────────────────────────────────────
   // Build
   // ──────────────────────────────────────────────────────────
@@ -279,7 +304,7 @@ class _GestureTranslationScreenState
                     child: SingleChildScrollView(
                       child: Column(
                         children: [
-                          // ── Camera preview ──
+                          // ── Camera preview (dynamic height) ──
                           _buildCameraSection(darkMode),
 
                           Padding(
@@ -294,6 +319,17 @@ class _GestureTranslationScreenState
                                   confidence: _currentConfidence,
                                   darkMode: darkMode,
                                 ),
+                                const SizedBox(height: 8),
+
+                                // ── Thumbs up / down feedback ──
+                                if (_detectionStatus == 'detected' && _currentSign.isNotEmpty)
+                                  _FeedbackRow(
+                                    feedbackValue: _feedbackValue,
+                                    feedbackSubmitted: _feedbackSubmitted,
+                                    darkMode: darkMode,
+                                    onThumbsUp: () => _handleFeedback(true),
+                                    onThumbsDown: () => _handleFeedback(false),
+                                  ),
                                 const SizedBox(height: 12),
 
                                 // Sentence output
@@ -445,71 +481,121 @@ class _GestureTranslationScreenState
       );
     }
 
-    // Live CameraPreview
-    return Stack(
+    // Live CameraPreview with adjustable height
+    return Column(
       children: [
-        SizedBox(
-          height: ESenyasDimens.cameraPreviewHeight,
-          width: double.infinity,
-          child: ClipRect(
-            child: OverflowBox(
-              alignment: Alignment.center,
-              child: FittedBox(
-                fit: BoxFit.cover,
-                child: SizedBox(
-                  width: _cameraController!.value.previewSize!.height,
-                  height: _cameraController!.value.previewSize!.width,
-                  child: CameraPreview(_cameraController!),
+        Stack(
+          children: [
+            AnimatedContainer(
+              duration: const Duration(milliseconds: 80),
+              curve: Curves.easeOut,
+              height: _cameraHeight,
+              width: double.infinity,
+              child: ClipRect(
+                child: OverflowBox(
+                  alignment: Alignment.center,
+                  child: FittedBox(
+                    fit: BoxFit.cover,
+                    child: SizedBox(
+                      width: _cameraController!.value.previewSize!.height,
+                      height: _cameraController!.value.previewSize!.width,
+                      child: CameraPreview(_cameraController!),
+                    ),
+                  ),
                 ),
               ),
             ),
-          ),
-        ),
-        // REC badge — reuses the "scanning/recording" visual from the old mock
-        if (_isDetecting)
-          Positioned(
-            top: 10,
-            left: 12,
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-              decoration: BoxDecoration(
-                color: ESenyasColors.destructiveRed,
-                borderRadius: BorderRadius.circular(4),
-              ),
-              child: const Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(Icons.circle, size: 8, color: Colors.white),
-                  SizedBox(width: 4),
-                  Text(
-                    'REC',
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 11,
-                      fontWeight: FontWeight.bold,
-                      letterSpacing: 1,
-                    ),
+            // REC badge — reuses the "scanning/recording" visual from the old mock
+            if (_isDetecting)
+              Positioned(
+                top: 10,
+                left: 12,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: ESenyasColors.destructiveRed,
+                    borderRadius: BorderRadius.circular(4),
                   ),
-                ],
+                  child: const Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.circle, size: 8, color: Colors.white),
+                      SizedBox(width: 4),
+                      Text(
+                        'REC',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 11,
+                          fontWeight: FontWeight.bold,
+                          letterSpacing: 1,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            // Camera flip button
+            Positioned(
+              top: 8,
+              right: 8,
+              child: GestureDetector(
+                onTap: _handleFlipCamera,
+                child: Container(
+                  padding: const EdgeInsets.all(6),
+                  decoration: BoxDecoration(
+                    color: Colors.black45,
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: const Icon(
+                    Icons.flip_camera_android,
+                    color: Colors.white,
+                    size: 20,
+                  ),
+                ),
               ),
             ),
-          ),
-        // Camera flip button
-        Positioned(
-          top: 8,
-          right: 8,
-          child: GestureDetector(
-            onTap: _handleFlipCamera,
-            child: Container(
-              padding: const EdgeInsets.all(6),
-              decoration: BoxDecoration(
-                color: Colors.black45,
-                borderRadius: BorderRadius.circular(20),
+            // Frame size indicator (top-left, below REC)
+            Positioned(
+              bottom: 28,
+              left: 12,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+                decoration: BoxDecoration(
+                  color: Colors.black54,
+                  borderRadius: BorderRadius.circular(4),
+                ),
+                child: Text(
+                  '${_cameraHeight.round()}px',
+                  style: const TextStyle(
+                    color: Colors.white70,
+                    fontSize: 10,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
               ),
-              child: const Icon(
-                Icons.flip_camera_android,
-                color: Colors.white,
-                size: 20,
+            ),
+          ],
+        ),
+        // ── Drag handle to resize camera frame ──
+        GestureDetector(
+          onVerticalDragUpdate: (details) {
+            setState(() {
+              _cameraHeight = (_cameraHeight + details.delta.dy)
+                  .clamp(_cameraHeightMin, _cameraHeightMax);
+            });
+          },
+          child: Container(
+            width: double.infinity,
+            height: 20,
+            color: darkMode ? ESenyasColors.cardDark : const Color(0xFFF0F0F0),
+            child: Center(
+              child: Container(
+                width: 40,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: darkMode ? ESenyasColors.gray600 : ESenyasColors.gray300,
+                  borderRadius: BorderRadius.circular(2),
+                ),
               ),
             ),
           ),
@@ -559,6 +645,158 @@ class _CameraFallback extends StatelessWidget {
           ),
           if (action != null) ...[const SizedBox(height: 8), action!],
         ],
+      ),
+    );
+  }
+}
+
+// ──────────────────────────────────────────────────────────────
+// Thumbs up / down feedback widget
+// ──────────────────────────────────────────────────────────────
+
+class _FeedbackRow extends StatelessWidget {
+  final bool? feedbackValue;
+  final bool feedbackSubmitted;
+  final bool darkMode;
+  final VoidCallback onThumbsUp;
+  final VoidCallback onThumbsDown;
+
+  const _FeedbackRow({
+    required this.feedbackValue,
+    required this.feedbackSubmitted,
+    required this.darkMode,
+    required this.onThumbsUp,
+    required this.onThumbsDown,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    // After submitting feedback, show a brief thank-you message
+    if (feedbackSubmitted && feedbackValue != null) {
+      return Padding(
+        padding: const EdgeInsets.only(bottom: 4),
+        child: Row(
+          children: [
+            Icon(
+              feedbackValue! ? Icons.thumb_up : Icons.thumb_down,
+              size: 14,
+              color: feedbackValue!
+                  ? ESenyasColors.accentGreen
+                  : ESenyasColors.destructiveRed,
+            ),
+            const SizedBox(width: 6),
+            Text(
+              feedbackValue!
+                  ? 'Salamat sa iyong feedback!'
+                  : 'Salamat! Pagbubutihin pa namin.',
+              style: TextStyle(
+                fontSize: 12,
+                fontStyle: FontStyle.italic,
+                color: darkMode ? ESenyasColors.gray400 : ESenyasColors.gray500,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    // Feedback buttons
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 4),
+      child: Row(
+        children: [
+          Text(
+            'Tama ba ang resulta?',
+            style: TextStyle(
+              fontSize: 12,
+              color: darkMode ? ESenyasColors.gray400 : ESenyasColors.gray500,
+            ),
+          ),
+          const SizedBox(width: 12),
+          _FeedbackButton(
+            icon: Icons.thumb_up_outlined,
+            activeIcon: Icons.thumb_up,
+            label: 'Oo',
+            isSelected: feedbackValue == true,
+            color: ESenyasColors.accentGreen,
+            darkMode: darkMode,
+            onTap: onThumbsUp,
+          ),
+          const SizedBox(width: 8),
+          _FeedbackButton(
+            icon: Icons.thumb_down_outlined,
+            activeIcon: Icons.thumb_down,
+            label: 'Hindi',
+            isSelected: feedbackValue == false,
+            color: ESenyasColors.destructiveRed,
+            darkMode: darkMode,
+            onTap: onThumbsDown,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _FeedbackButton extends StatelessWidget {
+  final IconData icon;
+  final IconData activeIcon;
+  final String label;
+  final bool isSelected;
+  final Color color;
+  final bool darkMode;
+  final VoidCallback onTap;
+
+  const _FeedbackButton({
+    required this.icon,
+    required this.activeIcon,
+    required this.label,
+    required this.isSelected,
+    required this.color,
+    required this.darkMode,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+        decoration: BoxDecoration(
+          color: isSelected
+              ? color.withValues(alpha: 0.15)
+              : (darkMode ? ESenyasColors.gray700 : const Color(0xFFF3F4F6)),
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(
+            color: isSelected ? color : Colors.transparent,
+            width: 1.5,
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              isSelected ? activeIcon : icon,
+              size: 14,
+              color: isSelected
+                  ? color
+                  : (darkMode ? ESenyasColors.gray400 : ESenyasColors.gray500),
+            ),
+            const SizedBox(width: 4),
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 11,
+                fontWeight: isSelected ? FontWeight.w600 : FontWeight.w500,
+                color: isSelected
+                    ? color
+                    : (darkMode ? ESenyasColors.gray400 : ESenyasColors.gray500),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
