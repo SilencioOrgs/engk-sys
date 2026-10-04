@@ -4,9 +4,12 @@ import 'package:camera/camera.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:hand_landmarker/hand_landmarker.dart';
+import 'package:file_picker/file_picker.dart';
+import 'package:flutter/services.dart';
 import 'package:permission_handler/permission_handler.dart';
 import '../models/frame_landmarks.dart';
 import '../services/tflite_ai_service.dart';
+import '../services/video_landmark_service.dart';
 import '../utils/constants.dart';
 import '../widgets/bottom_nav_bar.dart';
 import '../widgets/esenyas_app_bar.dart';
@@ -33,6 +36,7 @@ class _TestingModeScreenState extends State<TestingModeScreen> {
 
   // ── AI service ──
   final TFLiteAIService _aiService = TFLiteAIService();
+  final VideoLandmarkService _videoLandmarkService = VideoLandmarkService();
 
   // ── Camera ──
   CameraController? _cameraController;
@@ -72,6 +76,15 @@ class _TestingModeScreenState extends State<TestingModeScreen> {
   int _sensorOrientation = 0;
   CameraLensDirection? _activeLensDirection;
   Timer? _debugTimer;
+
+  // ── Uploaded video / Colab comparison ──
+  bool _isAnalyzingVideo = false;
+  String? _mediaFileName;
+  String? _mediaPrediction;
+  int _mediaConfidence = 0;
+  VideoLandmarkResult? _mediaResult;
+  List<MapEntry<String, double>> _mediaTop3 = const [];
+  String? _mediaError;
 
   // ──────────────────────────────────────────────────────────
   // Lifecycle
@@ -134,12 +147,7 @@ class _TestingModeScreenState extends State<TestingModeScreen> {
       imageFormatGroup: ImageFormatGroup.yuv420,
     );
     await controller.initialize();
-    await controller.startImageStream((CameraImage image) {
-      _aiService.handPlugin.processFrame(
-        image,
-        controller.description.sensorOrientation,
-      );
-    });
+    await _startCameraStream(controller);
 
     if (mounted) {
       setState(() {
@@ -149,6 +157,16 @@ class _TestingModeScreenState extends State<TestingModeScreen> {
         _activeLensDirection = controller.description.lensDirection;
       });
     }
+  }
+
+  Future<void> _startCameraStream(CameraController controller) async {
+    if (controller.value.isStreamingImages) return;
+    await controller.startImageStream((CameraImage image) {
+      _aiService.handPlugin.processFrame(
+        image,
+        controller.description.sensorOrientation,
+      );
+    });
   }
 
   // ──────────────────────────────────────────────────────────
@@ -253,6 +271,84 @@ class _TestingModeScreenState extends State<TestingModeScreen> {
     Future.delayed(const Duration(seconds: 2), () {
       if (mounted) setState(() => _saved = false);
     });
+  }
+
+  Future<void> _handleUploadVideo() async {
+    if (_isAnalyzingVideo || _isCapturing) return;
+
+    final picked = await FilePicker.platform.pickFiles(
+      type: FileType.video,
+      allowMultiple: false,
+    );
+    if (picked == null || picked.files.isEmpty) return;
+
+    final file = picked.files.single;
+    final path = file.path;
+    if (path == null || path.isEmpty) {
+      setState(() {
+        _mediaFileName = file.name;
+        _mediaError = 'Hindi ma-access ang local path ng napiling video.';
+      });
+      return;
+    }
+
+    setState(() {
+      _isAnalyzingVideo = true;
+      _mediaFileName = file.name;
+      _mediaPrediction = null;
+      _mediaConfidence = 0;
+      _mediaResult = null;
+      _mediaTop3 = const [];
+      _mediaError = null;
+    });
+
+    final controller = _cameraController;
+    final restartCamera =
+        controller != null && controller.value.isStreamingImages;
+
+    try {
+      if (restartCamera) {
+        await controller.stopImageStream();
+      }
+
+      final videoResult = await _videoLandmarkService.analyzeVideo(path);
+      final prediction =
+          await _aiService.recognizeFromBuffer(videoResult.frames);
+      final top3 = List<MapEntry<String, double>>.from(_aiService.lastTop3);
+
+      if (!mounted) return;
+      setState(() {
+        _mediaResult = videoResult;
+        _mediaPrediction = prediction?.sign ?? '(hindi natukoy)';
+        _mediaConfidence = prediction?.confidence ?? 0;
+        _mediaTop3 = top3;
+        _isAnalyzingVideo = false;
+      });
+    } on PlatformException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _mediaError = e.message ?? e.code;
+        _isAnalyzingVideo = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _mediaError = e.toString();
+        _isAnalyzingVideo = false;
+      });
+    } finally {
+      if (restartCamera &&
+          mounted &&
+          controller != null &&
+          controller.value.isInitialized &&
+          !controller.value.isStreamingImages) {
+        try {
+          await _startCameraStream(controller);
+        } catch (_) {
+          // Keep the video result visible even if camera restart fails.
+        }
+      }
+    }
   }
 
   Future<void> _handleRunGoldenSelfTest() async {
@@ -610,6 +706,123 @@ class _TestingModeScreenState extends State<TestingModeScreen> {
                             ),
                             const SizedBox(height: 12),
 
+                            // ── Uploaded video test ──
+                            SizedBox(
+                              width: double.infinity,
+                              height: ESenyasDimens.buttonHeight,
+                              child: OutlinedButton.icon(
+                                onPressed: _isAnalyzingVideo || _isCapturing
+                                    ? null
+                                    : _handleUploadVideo,
+                                icon: _isAnalyzingVideo
+                                    ? const SizedBox(
+                                        width: 18,
+                                        height: 18,
+                                        child: CircularProgressIndicator(
+                                          strokeWidth: 2,
+                                        ),
+                                      )
+                                    : const Icon(Icons.video_file_outlined,
+                                        size: 18),
+                                label: Text(
+                                  _isAnalyzingVideo
+                                      ? 'Analyzing video...'
+                                      : 'Upload test video',
+                                ),
+                                style: OutlinedButton.styleFrom(
+                                  foregroundColor: ESenyasColors.primaryBlue,
+                                  side: const BorderSide(
+                                    color: ESenyasColors.primaryBlue,
+                                  ),
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(
+                                      ESenyasDimens.borderRadiusMd,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                            if (_mediaFileName != null) ...[
+                              const SizedBox(height: 8),
+                              Container(
+                                width: double.infinity,
+                                padding: const EdgeInsets.all(12),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFFF8FAFC),
+                                  borderRadius: BorderRadius.circular(
+                                    ESenyasDimens.borderRadiusMd,
+                                  ),
+                                  border: Border.all(
+                                    color: const Color(0xFFCBD5E1),
+                                  ),
+                                ),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      _mediaFileName!,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.w600,
+                                        color: ESenyasColors.gray800,
+                                      ),
+                                    ),
+                                    if (_mediaError != null) ...[
+                                      const SizedBox(height: 6),
+                                      Text(
+                                        'Error: $_mediaError',
+                                        style: const TextStyle(
+                                          color: ESenyasColors.destructiveRed,
+                                          fontSize: 11,
+                                        ),
+                                      ),
+                                    ] else if (_mediaResult != null) ...[
+                                      const SizedBox(height: 6),
+                                      Text(
+                                        'Prediction: ${_mediaPrediction ?? "—"}'
+                                        '${_mediaConfidence > 0 ? " · $_mediaConfidence%" : ""}\n'
+                                        'Source: ${_mediaResult!.sourceFps.toStringAsFixed(2)} fps · '
+                                        '${(_mediaResult!.durationMs / 1000).toStringAsFixed(2)} s\n'
+                                        'Frames: ${_mediaResult!.sampledFrames} · '
+                                        'Active: ${_mediaResult!.activeFrames}',
+                                        style: const TextStyle(
+                                          fontSize: 11,
+                                          height: 1.45,
+                                          fontFamily: 'monospace',
+                                          color: ESenyasColors.gray700,
+                                        ),
+                                      ),
+                                      if (_mediaTop3.isNotEmpty) ...[
+                                        const SizedBox(height: 6),
+                                        const Text(
+                                          'Top 3',
+                                          style: TextStyle(
+                                            fontSize: 11,
+                                            fontWeight: FontWeight.bold,
+                                            color: ESenyasColors.gray700,
+                                          ),
+                                        ),
+                                        ..._mediaTop3.map(
+                                          (entry) => Text(
+                                            '• ${entry.key}: '
+                                            '${(entry.value * 100).toStringAsFixed(1)}%',
+                                            style: const TextStyle(
+                                              fontSize: 11,
+                                              fontFamily: 'monospace',
+                                              color: ESenyasColors.gray700,
+                                            ),
+                                          ),
+                                        ),
+                                      ],
+                                    ],
+                                  ],
+                                ),
+                              ),
+                            ],
+                            const SizedBox(height: 12),
+
                             // ── Run golden self-test button ──
                             SizedBox(
                               width: double.infinity,
@@ -876,10 +1089,28 @@ class _TestingModeScreenState extends State<TestingModeScreen> {
               builder: (context, hands, _) {
                 return HandLandmarkOverlay(
                   hands: hands,
-                  sourceSize: Size(previewSize.height, previewSize.width),
                   mirrorX: _activeLensDirection == CameraLensDirection.front,
                 );
               },
+            ),
+          ),
+          Positioned(
+            top: 8,
+            right: 8,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
+              decoration: BoxDecoration(
+                color: Colors.black54,
+                borderRadius: BorderRadius.circular(4),
+              ),
+              child: Text(
+                'Hands: $_latestHandCount',
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 10,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
             ),
           ),
           if (_isCapturing)
